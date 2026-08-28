@@ -1,6 +1,6 @@
 use std::{env, fs, process};
 
-use frontend::parse_source;
+use frontend::{parse_source, run_main};
 
 fn main() {
     let Some(path) = env::args().nth(1) else {
@@ -16,13 +16,21 @@ fn main() {
         }
     };
 
-    match parse_source(&source) {
-        Ok(program) => println!("parsed {} function(s)", program.functions.len()),
+    let program = match parse_source(&source) {
+        Ok(program) => program,
         Err(error) => {
             eprintln!(
                 "parse error at {}..{}: {}",
                 error.span.start, error.span.end, error.message
             );
+            process::exit(1);
+        }
+    };
+
+    match run_main(&program) {
+        Ok(output) => print!("{output}"),
+        Err(error) => {
+            eprintln!("runtime error: {}", error.message);
             process::exit(1);
         }
     }

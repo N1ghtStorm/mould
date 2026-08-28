@@ -1,5 +1,5 @@
 use crate::{
-    ast::{Block, Function, Program},
+    ast::{Block, CallStatement, Expression, Function, LetStatement, Program, Statement, Type},
     lexer::{LexError, Span, Token, TokenKind, lex},
 };
 
@@ -48,7 +48,7 @@ impl Parser {
 
     fn parse_function(&mut self) -> Result<Function, ParseError> {
         self.expect_simple(TokenKind::Fn, "`fn`")?;
-        let name = self.expect_identifier()?;
+        let name = self.expect_identifier("function name")?;
         self.expect_simple(TokenKind::LeftParen, "`(`")?;
         self.expect_simple(TokenKind::RightParen, "`)`")?;
         let body = self.parse_block()?;
@@ -58,11 +58,105 @@ impl Parser {
 
     fn parse_block(&mut self) -> Result<Block, ParseError> {
         self.expect_simple(TokenKind::LeftBrace, "`{`")?;
+
+        let mut statements = Vec::new();
+
+        while !self.at(&TokenKind::RightBrace) {
+            statements.push(self.parse_statement()?);
+        }
+
         self.expect_simple(TokenKind::RightBrace, "`}`")?;
-        Ok(Block)
+        Ok(Block { statements })
     }
 
-    fn expect_identifier(&mut self) -> Result<String, ParseError> {
+    fn parse_statement(&mut self) -> Result<Statement, ParseError> {
+        match &self.current().kind {
+            TokenKind::Let => self.parse_let_statement().map(Statement::Let),
+            TokenKind::Ident(_) => self.parse_call_statement().map(Statement::Call),
+            _ => Err(ParseError {
+                message: format!(
+                    "expected statement, found {}",
+                    describe_kind(&self.current().kind)
+                ),
+                span: self.current().span,
+            }),
+        }
+    }
+
+    fn parse_let_statement(&mut self) -> Result<LetStatement, ParseError> {
+        self.expect_simple(TokenKind::Let, "`let`")?;
+        let name = self.expect_identifier("variable name")?;
+        self.expect_simple(TokenKind::Colon, "`:`")?;
+        let ty = self.parse_type()?;
+        self.expect_simple(TokenKind::Equal, "`=`")?;
+        let value = self.parse_expression()?;
+        self.eat(TokenKind::Semicolon);
+
+        Ok(LetStatement { name, ty, value })
+    }
+
+    fn parse_call_statement(&mut self) -> Result<CallStatement, ParseError> {
+        let name = self.expect_identifier("function name")?;
+        self.expect_simple(TokenKind::LeftParen, "`(`")?;
+
+        let mut arguments = Vec::new();
+
+        if !self.at(&TokenKind::RightParen) {
+            loop {
+                arguments.push(self.parse_expression()?);
+
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+
+        self.expect_simple(TokenKind::RightParen, "`)`")?;
+        self.eat(TokenKind::Semicolon);
+
+        Ok(CallStatement { name, arguments })
+    }
+
+    fn parse_type(&mut self) -> Result<Type, ParseError> {
+        let token = self.current();
+
+        match token.kind {
+            TokenKind::I32 => {
+                self.advance();
+                Ok(Type::I32)
+            }
+            _ => Err(ParseError {
+                message: format!("expected type `i32`, found {}", describe_kind(&token.kind)),
+                span: token.span,
+            }),
+        }
+    }
+
+    fn parse_expression(&mut self) -> Result<Expression, ParseError> {
+        let token = self.current();
+
+        match &token.kind {
+            TokenKind::Integer(value) => {
+                let parsed = value.parse::<i32>().map_err(|_| ParseError {
+                    message: format!("integer literal `{value}` does not fit in i32"),
+                    span: token.span,
+                })?;
+                self.advance();
+                Ok(Expression::Integer(parsed))
+            }
+            TokenKind::Ident(name) => {
+                let name = name.clone();
+                self.advance();
+                Ok(Expression::Variable(name))
+            }
+            _ => Err(ParseError {
+                message: format!("expected expression, found {}", describe_kind(&token.kind)),
+                span: token.span,
+            }),
+        }
+    }
+
+    fn expect_identifier(&mut self, label: &str) -> Result<String, ParseError> {
         let token = self.current();
 
         match &token.kind {
@@ -72,10 +166,7 @@ impl Parser {
                 Ok(name)
             }
             _ => Err(ParseError {
-                message: format!(
-                    "expected function name, found {}",
-                    describe_kind(&token.kind)
-                ),
+                message: format!("expected {label}, found {}", describe_kind(&token.kind)),
                 span: token.span,
             }),
         }
@@ -108,22 +199,44 @@ impl Parser {
             self.position += 1;
         }
     }
+
+    fn eat(&mut self, kind: TokenKind) -> bool {
+        if self.at(&kind) {
+            self.advance();
+            return true;
+        }
+
+        false
+    }
 }
 
 fn describe_kind(kind: &TokenKind) -> String {
     match kind {
         TokenKind::Fn => "`fn`".to_string(),
+        TokenKind::Let => "`let`".to_string(),
+        TokenKind::I32 => "`i32`".to_string(),
         TokenKind::Ident(name) => format!("identifier `{name}`"),
+        TokenKind::Integer(value) => format!("integer literal `{value}`"),
         TokenKind::LeftParen => "`(`".to_string(),
         TokenKind::RightParen => "`)`".to_string(),
         TokenKind::LeftBrace => "`{`".to_string(),
         TokenKind::RightBrace => "`}`".to_string(),
+        TokenKind::Colon => "`:`".to_string(),
+        TokenKind::Comma => "`,`".to_string(),
+        TokenKind::Equal => "`=`".to_string(),
+        TokenKind::Semicolon => "`;`".to_string(),
         TokenKind::Eof => "end of file".to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::{
+        Expression,
+        Statement::{self},
+        Type,
+    };
+
     use super::parse_source;
 
     #[test]
@@ -138,6 +251,7 @@ mod tests {
 
         assert_eq!(program.functions.len(), 1);
         assert_eq!(program.functions[0].name, "funcname");
+        assert!(program.functions[0].body.statements.is_empty());
     }
 
     #[test]
@@ -161,9 +275,66 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_empty_body_for_now() {
+    fn parses_i32_variable() {
+        let program = parse_source("fn main() { let a: i32 = 1 }").unwrap();
+        let statement = &program.functions[0].body.statements[0];
+
+        assert_eq!(
+            statement,
+            &Statement::Let(crate::LetStatement {
+                name: "a".to_string(),
+                ty: Type::I32,
+                value: Expression::Integer(1),
+            })
+        );
+    }
+
+    #[test]
+    fn allows_semicolon_after_variable() {
+        let program = parse_source("fn main() { let a: i32 = 1; }").unwrap();
+
+        assert_eq!(program.functions[0].body.statements.len(), 1);
+    }
+
+    #[test]
+    fn parses_println_number_call() {
+        let program = parse_source("fn main() { println(1) }").unwrap();
+        let statement = &program.functions[0].body.statements[0];
+
+        assert_eq!(
+            statement,
+            &Statement::Call(crate::CallStatement {
+                name: "println".to_string(),
+                arguments: vec![Expression::Integer(1)],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_println_variable_call() {
+        let program = parse_source("fn main() { println(a); }").unwrap();
+        let statement = &program.functions[0].body.statements[0];
+
+        assert_eq!(
+            statement,
+            &Statement::Call(crate::CallStatement {
+                name: "println".to_string(),
+                arguments: vec![Expression::Variable("a".to_string())],
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_type_for_now() {
+        let error = parse_source("fn nope() { let value: u32 = 1 }").unwrap_err();
+
+        assert!(error.message.contains("expected type `i32`"));
+    }
+
+    #[test]
+    fn rejects_unknown_statement_for_now() {
         let error = parse_source("fn nope() { value }").unwrap_err();
 
-        assert!(error.message.contains("expected `}`"));
+        assert!(error.message.contains("expected `(`"));
     }
 }

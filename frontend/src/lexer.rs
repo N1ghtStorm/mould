@@ -13,11 +13,18 @@ pub struct Token {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenKind {
     Fn,
+    Let,
+    I32,
     Ident(String),
+    Integer(String),
     LeftParen,
     RightParen,
     LeftBrace,
     RightBrace,
+    Colon,
+    Comma,
+    Equal,
+    Semicolon,
     Eof,
 }
 
@@ -55,7 +62,12 @@ impl Lexer<'_> {
                 ')' => self.push_single(TokenKind::RightParen),
                 '{' => self.push_single(TokenKind::LeftBrace),
                 '}' => self.push_single(TokenKind::RightBrace),
+                ':' => self.push_single(TokenKind::Colon),
+                ',' => self.push_single(TokenKind::Comma),
+                '=' => self.push_single(TokenKind::Equal),
+                ';' => self.push_single(TokenKind::Semicolon),
                 ch if is_ident_start(ch) => self.lex_identifier(),
+                ch if ch.is_ascii_digit() => self.lex_integer(),
                 _ => {
                     let start = self.position;
                     self.bump();
@@ -95,11 +107,33 @@ impl Lexer<'_> {
         let text = &self.source[start..self.position];
         let kind = match text {
             "fn" => TokenKind::Fn,
+            "let" => TokenKind::Let,
+            "i32" => TokenKind::I32,
             _ => TokenKind::Ident(text.to_string()),
         };
 
         self.tokens.push(Token {
             kind,
+            span: Span {
+                start,
+                end: self.position,
+            },
+        });
+    }
+
+    fn lex_integer(&mut self) {
+        let start = self.position;
+        self.bump();
+
+        while let Some(ch) = self.peek() {
+            if !ch.is_ascii_digit() {
+                break;
+            }
+            self.bump();
+        }
+
+        self.tokens.push(Token {
+            kind: TokenKind::Integer(self.source[start..self.position].to_string()),
             span: Span {
                 start,
                 end: self.position,
