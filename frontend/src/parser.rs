@@ -121,12 +121,15 @@ impl Parser {
         let token = self.current();
 
         match token.kind {
-            TokenKind::I32 => {
+            TokenKind::PrimitiveType(ty) => {
                 self.advance();
-                Ok(Type::I32)
+                Ok(ty)
             }
             _ => Err(ParseError {
-                message: format!("expected type `i32`, found {}", describe_kind(&token.kind)),
+                message: format!(
+                    "expected primitive type, found {}",
+                    describe_kind(&token.kind)
+                ),
                 span: token.span,
             }),
         }
@@ -137,12 +140,26 @@ impl Parser {
 
         match &token.kind {
             TokenKind::Integer(value) => {
-                let parsed = value.parse::<i32>().map_err(|_| ParseError {
-                    message: format!("integer literal `{value}` does not fit in i32"),
+                let parsed = value.parse::<u128>().map_err(|_| ParseError {
+                    message: format!("integer literal `{value}` does not fit in u128"),
                     span: token.span,
                 })?;
                 self.advance();
                 Ok(Expression::Integer(parsed))
+            }
+            TokenKind::Float(value) => {
+                value.parse::<f64>().map_err(|_| ParseError {
+                    message: format!("float literal `{value}` is invalid"),
+                    span: token.span,
+                })?;
+                let value = value.clone();
+                self.advance();
+                Ok(Expression::Float(value))
+            }
+            TokenKind::BoolLiteral(value) => {
+                let value = *value;
+                self.advance();
+                Ok(Expression::Bool(value))
             }
             TokenKind::Ident(name) => {
                 let name = name.clone();
@@ -214,9 +231,11 @@ fn describe_kind(kind: &TokenKind) -> String {
     match kind {
         TokenKind::Fn => "`fn`".to_string(),
         TokenKind::Let => "`let`".to_string(),
-        TokenKind::I32 => "`i32`".to_string(),
+        TokenKind::PrimitiveType(ty) => format!("type `{}`", ty.name()),
+        TokenKind::BoolLiteral(value) => format!("bool literal `{value}`"),
         TokenKind::Ident(name) => format!("identifier `{name}`"),
         TokenKind::Integer(value) => format!("integer literal `{value}`"),
+        TokenKind::Float(value) => format!("float literal `{value}`"),
         TokenKind::LeftParen => "`(`".to_string(),
         TokenKind::RightParen => "`)`".to_string(),
         TokenKind::LeftBrace => "`{`".to_string(),
@@ -290,6 +309,61 @@ mod tests {
     }
 
     #[test]
+    fn parses_all_primitive_types() {
+        let type_names = Type::ALL.map(Type::name).join(", ");
+        let source = format!(
+            "fn main() {{ {} }}",
+            Type::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(index, ty)| match ty {
+                    Type::F16 | Type::F32 | Type::F64 => {
+                        format!("let v{index}: {} = 1.5", ty.name())
+                    }
+                    Type::Bool => format!("let v{index}: bool = true"),
+                    _ => format!("let v{index}: {} = 1", ty.name()),
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+
+        let program =
+            parse_source(&source).unwrap_or_else(|error| panic!("{type_names}: {error:?}"));
+
+        assert_eq!(program.functions[0].body.statements.len(), Type::ALL.len());
+    }
+
+    #[test]
+    fn parses_bool_variable() {
+        let program = parse_source("fn main() { let ready: bool = true }").unwrap();
+        let statement = &program.functions[0].body.statements[0];
+
+        assert_eq!(
+            statement,
+            &Statement::Let(crate::LetStatement {
+                name: "ready".to_string(),
+                ty: Type::Bool,
+                value: Expression::Bool(true),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_float_variable() {
+        let program = parse_source("fn main() { let pi: f64 = 3.14 }").unwrap();
+        let statement = &program.functions[0].body.statements[0];
+
+        assert_eq!(
+            statement,
+            &Statement::Let(crate::LetStatement {
+                name: "pi".to_string(),
+                ty: Type::F64,
+                value: Expression::Float("3.14".to_string()),
+            })
+        );
+    }
+
+    #[test]
     fn allows_semicolon_after_variable() {
         let program = parse_source("fn main() { let a: i32 = 1; }").unwrap();
 
@@ -326,9 +400,9 @@ mod tests {
 
     #[test]
     fn rejects_unknown_type_for_now() {
-        let error = parse_source("fn nope() { let value: u32 = 1 }").unwrap_err();
+        let error = parse_source("fn nope() { let value: str = 1 }").unwrap_err();
 
-        assert!(error.message.contains("expected type `i32`"));
+        assert!(error.message.contains("expected primitive type"));
     }
 
     #[test]

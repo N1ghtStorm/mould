@@ -10,9 +10,8 @@ use std::{
 use frontend::{
     CallStatement, Expression, Function, LetStatement, Program,
     Statement::{self, Call, Let},
+    Type,
 };
-
-const PRINTLN_I32_FORMAT_LABEL: &str = "L_mould_println_i32_format";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
@@ -87,18 +86,20 @@ pub fn compile_program_to_assembly(program: &Program) -> Result<String, CompileE
         });
     }
 
+    let mut emitter = AssemblyEmitter::new();
+
+    for function in &program.functions {
+        emit_function(&mut emitter, function, &known_functions)?;
+        emitter.text.push('\n');
+    }
+
     let mut output = String::new();
     output.push_str(".build_version macos, 11, 0\n");
     output.push_str(".section __TEXT,__cstring,cstring_literals\n");
-    writeln!(output, "{PRINTLN_I32_FORMAT_LABEL}:").unwrap();
-    output.push_str("    .asciz \"%d\\n\"\n\n");
+    output.push_str(&emitter.cstrings);
+    output.push('\n');
     output.push_str(".section __TEXT,__text,regular,pure_instructions\n\n");
-
-    for function in &program.functions {
-        emit_function(&mut output, function, &known_functions)?;
-        output.push('\n');
-    }
-
+    output.push_str(&emitter.text);
     output.push_str(".globl _main\n");
     output.push_str(".p2align 2\n");
     output.push_str("_main:\n");
@@ -134,49 +135,63 @@ fn collect_functions(program: &Program) -> Result<HashSet<String>, CompileError>
 }
 
 fn emit_function(
-    output: &mut String,
+    emitter: &mut AssemblyEmitter,
     function: &Function,
     known_functions: &HashSet<String>,
 ) -> Result<(), CompileError> {
-    let stack_size = align_to_16(count_local_variables(function) * 4);
-
-    output.push_str(".p2align 2\n");
-    writeln!(output, "{}:", asm_function_name(&function.name)).unwrap();
-    output.push_str("    stp x29, x30, [sp, #-16]!\n");
-    output.push_str("    mov x29, sp\n");
-
-    if stack_size > 0 {
-        writeln!(output, "    sub sp, sp, #{stack_size}").unwrap();
-    }
+    emitter.text.push_str(".p2align 2\n");
+    writeln!(emitter.text, "{}:", asm_function_name(&function.name)).unwrap();
+    emitter.text.push_str("    stp x29, x30, [sp, #-16]!\n");
+    emitter.text.push_str("    mov x29, sp\n");
 
     let mut compiler = FunctionCompiler::new(known_functions);
 
     for statement in &function.body.statements {
-        compiler.emit_statement(output, statement)?;
+        compiler.emit_statement(emitter, statement)?;
     }
 
-    if stack_size > 0 {
-        writeln!(output, "    add sp, sp, #{stack_size}").unwrap();
-    }
-
-    output.push_str("    ldp x29, x30, [sp], #16\n");
-    output.push_str("    ret\n");
+    emitter.text.push_str("    ldp x29, x30, [sp], #16\n");
+    emitter.text.push_str("    ret\n");
     Ok(())
 }
 
-fn count_local_variables(function: &Function) -> usize {
-    function
-        .body
-        .statements
-        .iter()
-        .filter(|statement| matches!(statement, Let(_)))
-        .count()
+struct AssemblyEmitter {
+    text: String,
+    cstrings: String,
+    next_string: usize,
+}
+
+impl AssemblyEmitter {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            cstrings: String::new(),
+            next_string: 0,
+        }
+    }
+
+    fn add_cstring(&mut self, value: &str) -> String {
+        let label = format!("L_mould_string_{}", self.next_string);
+        self.next_string += 1;
+
+        writeln!(self.cstrings, "{label}:").unwrap();
+        writeln!(self.cstrings, "    .asciz \"{}\"", escape_cstring(value)).unwrap();
+
+        label
+    }
+
+    fn emit_puts(&mut self, value: &str) {
+        let label = self.add_cstring(value);
+
+        writeln!(self.text, "    adrp x0, {label}@PAGE").unwrap();
+        writeln!(self.text, "    add x0, x0, {label}@PAGEOFF").unwrap();
+        self.text.push_str("    bl _puts\n");
+    }
 }
 
 struct FunctionCompiler<'program> {
     known_functions: &'program HashSet<String>,
-    variables: HashMap<String, usize>,
-    next_variable: usize,
+    variables: HashMap<String, Value>,
 }
 
 impl<'program> FunctionCompiler<'program> {
@@ -184,44 +199,33 @@ impl<'program> FunctionCompiler<'program> {
         Self {
             known_functions,
             variables: HashMap::new(),
-            next_variable: 0,
         }
     }
 
     fn emit_statement(
         &mut self,
-        output: &mut String,
+        emitter: &mut AssemblyEmitter,
         statement: &Statement,
     ) -> Result<(), CompileError> {
         match statement {
-            Let(statement) => self.emit_let_statement(output, statement),
-            Call(statement) => self.emit_call_statement(output, statement),
+            Let(statement) => self.emit_let_statement(statement),
+            Call(statement) => self.emit_call_statement(emitter, statement),
         }
     }
 
-    fn emit_let_statement(
-        &mut self,
-        output: &mut String,
-        statement: &LetStatement,
-    ) -> Result<(), CompileError> {
-        self.emit_expression(output, &statement.value)?;
-
-        let offset = (self.next_variable + 1) * 4;
-        self.next_variable += 1;
-        self.emit_stack_address(output, offset)?;
-        output.push_str("    str w8, [x9]\n");
-        self.variables.insert(statement.name.clone(), offset);
-
+    fn emit_let_statement(&mut self, statement: &LetStatement) -> Result<(), CompileError> {
+        let value = self.evaluate_as(&statement.value, statement.ty)?;
+        self.variables.insert(statement.name.clone(), value);
         Ok(())
     }
 
     fn emit_call_statement(
         &mut self,
-        output: &mut String,
+        emitter: &mut AssemblyEmitter,
         statement: &CallStatement,
     ) -> Result<(), CompileError> {
         if statement.name == "println" {
-            return self.emit_println(output, statement);
+            return self.emit_println(emitter, statement);
         }
 
         if !self.known_functions.contains(&statement.name) {
@@ -236,13 +240,18 @@ impl<'program> FunctionCompiler<'program> {
             });
         }
 
-        writeln!(output, "    bl {}", asm_function_name(&statement.name)).unwrap();
+        writeln!(
+            emitter.text,
+            "    bl {}",
+            asm_function_name(&statement.name)
+        )
+        .unwrap();
         Ok(())
     }
 
     fn emit_println(
         &mut self,
-        output: &mut String,
+        emitter: &mut AssemblyEmitter,
         statement: &CallStatement,
     ) -> Result<(), CompileError> {
         if statement.arguments.len() != 1 {
@@ -251,62 +260,125 @@ impl<'program> FunctionCompiler<'program> {
             });
         }
 
-        self.emit_expression(output, &statement.arguments[0])?;
-        output.push_str("    sub sp, sp, #16\n");
-        output.push_str("    sxtw x8, w8\n");
-        output.push_str("    str x8, [sp]\n");
-        writeln!(output, "    adrp x0, {PRINTLN_I32_FORMAT_LABEL}@PAGE").unwrap();
-        writeln!(output, "    add x0, x0, {PRINTLN_I32_FORMAT_LABEL}@PAGEOFF").unwrap();
-        output.push_str("    bl _printf\n");
-        output.push_str("    add sp, sp, #16\n");
+        let value = self.evaluate(&statement.arguments[0])?;
+        emitter.emit_puts(&value.printable());
 
         Ok(())
     }
 
-    fn emit_expression(
-        &self,
-        output: &mut String,
-        expression: &Expression,
-    ) -> Result<(), CompileError> {
+    fn evaluate(&self, expression: &Expression) -> Result<Value, CompileError> {
         match expression {
-            Expression::Integer(value) => {
-                emit_load_i32(output, *value);
-                Ok(())
+            Expression::Integer(value) => integer_value(*value, Type::I32),
+            Expression::Float(value) => float_value(value, Type::F64),
+            Expression::Bool(value) => Ok(Value::Bool(*value)),
+            Expression::Variable(name) => {
+                self.variables
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| CompileError {
+                        message: format!("variable `{name}` not found"),
+                    })
+            }
+        }
+    }
+
+    fn evaluate_as(&self, expression: &Expression, ty: Type) -> Result<Value, CompileError> {
+        match expression {
+            Expression::Integer(value) => integer_value(*value, ty),
+            Expression::Float(value) => float_value(value, ty),
+            Expression::Bool(value) => {
+                if ty.is_bool() {
+                    Ok(Value::Bool(*value))
+                } else {
+                    Err(CompileError {
+                        message: format!("cannot assign bool literal to `{}`", ty.name()),
+                    })
+                }
             }
             Expression::Variable(name) => {
-                let offset = self.variables.get(name).ok_or_else(|| CompileError {
-                    message: format!("variable `{name}` not found"),
-                })?;
+                let value = self
+                    .variables
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| CompileError {
+                        message: format!("variable `{name}` not found"),
+                    })?;
 
-                self.emit_stack_address(output, *offset)?;
-                output.push_str("    ldr w8, [x9]\n");
-                Ok(())
+                if value.ty() == ty {
+                    Ok(value)
+                } else {
+                    Err(CompileError {
+                        message: format!(
+                            "cannot assign `{}` value to `{}`",
+                            value.ty().name(),
+                            ty.name()
+                        ),
+                    })
+                }
             }
         }
-    }
-
-    fn emit_stack_address(&self, output: &mut String, offset: usize) -> Result<(), CompileError> {
-        if offset > 4095 {
-            return Err(CompileError {
-                message: "function has too many local variables".to_string(),
-            });
-        }
-
-        writeln!(output, "    sub x9, x29, #{offset}").unwrap();
-        Ok(())
     }
 }
 
-fn emit_load_i32(output: &mut String, value: i32) {
-    let bits = value as u32;
-    let low = bits & 0xffff;
-    let high = bits >> 16;
+#[derive(Debug, Clone, PartialEq)]
+enum Value {
+    Integer { value: u128, ty: Type },
+    Float { value: f64, ty: Type },
+    Bool(bool),
+}
 
-    writeln!(output, "    movz w8, #{low}").unwrap();
-
-    if high != 0 {
-        writeln!(output, "    movk w8, #{high}, lsl #16").unwrap();
+impl Value {
+    fn ty(&self) -> Type {
+        match self {
+            Self::Integer { ty, .. } | Self::Float { ty, .. } => *ty,
+            Self::Bool(_) => Type::Bool,
+        }
     }
+
+    fn printable(&self) -> String {
+        match self {
+            Self::Integer { value, .. } => value.to_string(),
+            Self::Float { value, .. } => value.to_string(),
+            Self::Bool(value) => value.to_string(),
+        }
+    }
+}
+
+fn integer_value(value: u128, ty: Type) -> Result<Value, CompileError> {
+    if !ty.is_integer() {
+        return Err(CompileError {
+            message: format!("cannot assign integer literal to `{}`", ty.name()),
+        });
+    }
+
+    let max = ty.max_integer_value().expect("integer type has max value");
+
+    if value > max {
+        return Err(CompileError {
+            message: format!("integer literal `{value}` does not fit in `{}`", ty.name()),
+        });
+    }
+
+    Ok(Value::Integer { value, ty })
+}
+
+fn float_value(value: &str, ty: Type) -> Result<Value, CompileError> {
+    if !ty.is_float() {
+        return Err(CompileError {
+            message: format!("cannot assign float literal to `{}`", ty.name()),
+        });
+    }
+
+    let value = match ty {
+        Type::F16 | Type::F32 => value.parse::<f32>().map(f64::from),
+        Type::F64 => value.parse::<f64>(),
+        _ => unreachable!("checked by is_float"),
+    }
+    .map_err(|_| CompileError {
+        message: format!("float literal `{value}` is invalid"),
+    })?;
+
+    Ok(Value::Float { value, ty })
 }
 
 fn asm_function_name(name: &str) -> String {
@@ -327,8 +399,20 @@ fn asm_name(prefix: &str, name: &str) -> String {
     output
 }
 
-fn align_to_16(value: usize) -> usize {
-    (value + 15) & !15
+fn escape_cstring(value: &str) -> String {
+    let mut escaped = String::new();
+
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(ch),
+        }
+    }
+
+    escaped
 }
 
 fn temporary_assembly_path() -> PathBuf {
@@ -350,17 +434,34 @@ mod tests {
     fn emits_println_number() {
         let assembly = compile("fn main() { println(1) }");
 
-        assert!(assembly.contains("movz w8, #1"));
-        assert!(assembly.contains("bl _printf"));
+        assert!(assembly.contains(".asciz \"1\""));
+        assert!(assembly.contains("bl _puts"));
     }
 
     #[test]
     fn emits_variable_and_println() {
         let assembly = compile("fn main() { let a: i32 = 1 println(a) }");
 
-        assert!(assembly.contains("sub sp, sp, #16"));
-        assert!(assembly.contains("str w8, [x9]"));
-        assert!(assembly.contains("ldr w8, [x9]"));
+        assert!(assembly.contains(".asciz \"1\""));
+        assert!(assembly.contains("bl _puts"));
+    }
+
+    #[test]
+    fn emits_bool_and_float() {
+        let assembly =
+            compile("fn main() { let a: bool = true println(a) let b: f64 = 1.5 println(b) }");
+
+        assert!(assembly.contains(".asciz \"true\""));
+        assert!(assembly.contains(".asciz \"1.5\""));
+    }
+
+    #[test]
+    fn emits_u128() {
+        let assembly = compile(
+            "fn main() { let n: u128 = 340282366920938463463374607431768211455 println(n) }",
+        );
+
+        assert!(assembly.contains(".asciz \"340282366920938463463374607431768211455\""));
     }
 
     #[test]
@@ -383,6 +484,13 @@ mod tests {
         let error = compile_error("fn main() { nope() }");
 
         assert!(error.message.contains("unknown function `nope`"));
+    }
+
+    #[test]
+    fn rejects_integer_out_of_range() {
+        let error = compile_error("fn main() { let n: i8 = 128 }");
+
+        assert!(error.message.contains("does not fit in `i8`"));
     }
 
     fn compile(source: &str) -> String {

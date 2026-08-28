@@ -1,0 +1,35 @@
+fn main() {
+    let a: i8 = 1
+    let b: u8 = 2
+    let c: i16 = 3
+    let d: u16 = 4
+    let e: i32 = 5
+    let f: u32 = 6
+    let g: i64 = 7
+    let h: u64 = 8
+    let i: i128 = 9
+    let j: u128 = 10
+    let k: isize = 11
+    let l: usize = 12
+    let m: f16 = 1.5
+    let n: f32 = 2.5
+    let o: f64 = 3.5
+    let p: bool = true
+
+    println(a)
+    println(b)
+    println(c)
+    println(d)
+    println(e)
+    println(f)
+    println(g)
+    println(h)
+    println(i)
+    println(j)
+    println(k)
+    println(l)
+    println(m)
+    println(n)
+    println(o)
+    println(p)
+}

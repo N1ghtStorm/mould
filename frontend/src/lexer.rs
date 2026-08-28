@@ -1,3 +1,5 @@
+use crate::Type;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
     pub start: usize,
@@ -14,9 +16,11 @@ pub struct Token {
 pub enum TokenKind {
     Fn,
     Let,
-    I32,
+    PrimitiveType(Type),
+    BoolLiteral(bool),
     Ident(String),
     Integer(String),
+    Float(String),
     LeftParen,
     RightParen,
     LeftBrace,
@@ -67,7 +71,7 @@ impl Lexer<'_> {
                 '=' => self.push_single(TokenKind::Equal),
                 ';' => self.push_single(TokenKind::Semicolon),
                 ch if is_ident_start(ch) => self.lex_identifier(),
-                ch if ch.is_ascii_digit() => self.lex_integer(),
+                ch if ch.is_ascii_digit() => self.lex_number(),
                 _ => {
                     let start = self.position;
                     self.bump();
@@ -105,11 +109,13 @@ impl Lexer<'_> {
         }
 
         let text = &self.source[start..self.position];
-        let kind = match text {
-            "fn" => TokenKind::Fn,
-            "let" => TokenKind::Let,
-            "i32" => TokenKind::I32,
-            _ => TokenKind::Ident(text.to_string()),
+        let kind = match (text, Type::from_name(text)) {
+            ("fn", _) => TokenKind::Fn,
+            ("let", _) => TokenKind::Let,
+            ("true", _) => TokenKind::BoolLiteral(true),
+            ("false", _) => TokenKind::BoolLiteral(false),
+            (_, Some(ty)) => TokenKind::PrimitiveType(ty),
+            (_, None) => TokenKind::Ident(text.to_string()),
         };
 
         self.tokens.push(Token {
@@ -121,7 +127,7 @@ impl Lexer<'_> {
         });
     }
 
-    fn lex_integer(&mut self) {
+    fn lex_number(&mut self) {
         let start = self.position;
         self.bump();
 
@@ -130,6 +136,26 @@ impl Lexer<'_> {
                 break;
             }
             self.bump();
+        }
+
+        if self.peek() == Some('.') && self.peek_next().is_some_and(|ch| ch.is_ascii_digit()) {
+            self.bump();
+
+            while let Some(ch) = self.peek() {
+                if !ch.is_ascii_digit() {
+                    break;
+                }
+                self.bump();
+            }
+
+            self.tokens.push(Token {
+                kind: TokenKind::Float(self.source[start..self.position].to_string()),
+                span: Span {
+                    start,
+                    end: self.position,
+                },
+            });
+            return;
         }
 
         self.tokens.push(Token {
@@ -155,6 +181,12 @@ impl Lexer<'_> {
 
     fn peek(&self) -> Option<char> {
         self.source[self.position..].chars().next()
+    }
+
+    fn peek_next(&self) -> Option<char> {
+        let mut chars = self.source[self.position..].chars();
+        chars.next()?;
+        chars.next()
     }
 
     fn bump(&mut self) {
