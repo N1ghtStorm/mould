@@ -2,5 +2,11 @@
 name = "backend"
 version = "0.1.0"
 edition = "2024"
+autobins = false
+
+[[bin]]
+name = "mould"
+path = "src/main.rs"
 
 [dependencies]
+frontend = { path = "../frontend" }
