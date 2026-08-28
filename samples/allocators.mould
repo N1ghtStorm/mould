@@ -1,0 +1,15 @@
+struct Point {
+    x: i32,
+    ready: bool,
+}
+
+fn main() {
+    let number: &i32 = alloc(7)
+    println(*number)
+    dealloc(number)
+
+    let point: &Point = alloc(Point { x: 9, ready: true })
+    println(point.x)
+    println(point.ready)
+    dealloc(point)
+}

@@ -206,6 +206,20 @@ mod tests {
     }
 
     #[test]
+    fn emits_allocated_value() {
+        let assembly = compile("fn main() { let p: &i32 = alloc(7) println(*p) dealloc(p) }");
+
+        assert!(assembly.contains(".asciz \"7\""));
+    }
+
+    #[test]
+    fn rejects_use_after_dealloc() {
+        let error = compile_error("fn main() { let p: &i32 = alloc(7) dealloc(p) println(*p) }");
+
+        assert!(error.message.contains("freed pointer"));
+    }
+
+    #[test]
     fn rejects_missing_main() {
         let error = compile_error("fn helper() {}");
 

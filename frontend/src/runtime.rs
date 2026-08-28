@@ -32,7 +32,13 @@ enum Value {
         name: String,
         fields: Vec<(String, Value)>,
     },
-    Pointer(Box<Value>),
+    Pointer(PointerValue),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum PointerValue {
+    Reference(Box<Value>),
+    Heap { allocation: usize, ty: Type },
 }
 
 impl Value {
@@ -41,7 +47,7 @@ impl Value {
             Self::Integer { ty, .. } | Self::Float { ty, .. } => ty.clone(),
             Self::Bool(_) => Type::Bool,
             Self::Struct { name, .. } => Type::Struct(name.clone()),
-            Self::Pointer(value) => Type::Pointer(Box::new(value.ty())),
+            Self::Pointer(pointer) => Type::Pointer(Box::new(pointer.ty())),
         }
     }
 
@@ -58,7 +64,23 @@ impl Value {
                     .join(", ");
                 format!("{name} {{ {fields} }}")
             }
-            Self::Pointer(value) => format!("&{}", value.printable()),
+            Self::Pointer(pointer) => pointer.printable(),
+        }
+    }
+}
+
+impl PointerValue {
+    fn ty(&self) -> Type {
+        match self {
+            Self::Reference(value) => value.ty(),
+            Self::Heap { ty, .. } => ty.clone(),
+        }
+    }
+
+    fn printable(&self) -> String {
+        match self {
+            Self::Reference(value) => format!("&{}", value.printable()),
+            Self::Heap { allocation, ty } => format!("&{}#{allocation}", ty.name()),
         }
     }
 }
@@ -66,6 +88,8 @@ impl Value {
 struct Runtime<'program> {
     structs: HashMap<String, &'program StructDefinition>,
     functions: HashMap<String, &'program Function>,
+    heap: HashMap<usize, Value>,
+    next_allocation: usize,
     output: String,
 }
 
@@ -102,6 +126,12 @@ impl<'program> Runtime<'program> {
         let mut functions = HashMap::new();
 
         for function in &program.functions {
+            if is_builtin_function(&function.name) {
+                return Err(RuntimeError {
+                    message: format!("cannot define builtin function `{}`", function.name),
+                });
+            }
+
             if functions.insert(function.name.clone(), function).is_some() {
                 return Err(RuntimeError {
                     message: format!("function `{}` is already defined", function.name),
@@ -132,6 +162,8 @@ impl<'program> Runtime<'program> {
         Ok(Self {
             structs,
             functions,
+            heap: HashMap::new(),
+            next_allocation: 0,
             output: String::new(),
         })
     }
@@ -254,7 +286,7 @@ impl<'program> Runtime<'program> {
             Expression::FieldAccess(access) => self.evaluate_field_access(access, variables),
             Expression::AddressOf(expression) => {
                 let value = self.evaluate(expression, variables)?;
-                Ok(Value::Pointer(Box::new(value)))
+                Ok(Value::Pointer(PointerValue::Reference(Box::new(value))))
             }
             Expression::Dereference(expression) => self.evaluate_dereference(expression, variables),
         }
@@ -285,6 +317,10 @@ impl<'program> Runtime<'program> {
                 expect_type(value, ty)
             }
             Expression::Call(call) => {
+                if call.name == "alloc" {
+                    return self.evaluate_alloc_as(call, ty, variables);
+                }
+
                 let value = self.evaluate_call_expression(call, variables)?;
                 expect_type(value, ty)
             }
@@ -298,7 +334,7 @@ impl<'program> Runtime<'program> {
             }
             Expression::AddressOf(expression) => {
                 let value = self.evaluate(expression, variables)?;
-                expect_type(Value::Pointer(Box::new(value)), ty)
+                expect_type(Value::Pointer(PointerValue::Reference(Box::new(value))), ty)
             }
             Expression::Dereference(expression) => {
                 let value = self.evaluate_dereference(expression, variables)?;
@@ -316,6 +352,15 @@ impl<'program> Runtime<'program> {
             return self.evaluate_println(call, variables);
         }
 
+        if call.name == "dealloc" {
+            return self.evaluate_dealloc(call, variables);
+        }
+
+        if call.name == "alloc" {
+            self.evaluate_alloc(call, variables)?;
+            return Ok(());
+        }
+
         self.call_function(&call.name, &call.arguments, variables)?;
         Ok(())
     }
@@ -329,6 +374,16 @@ impl<'program> Runtime<'program> {
             return Err(RuntimeError {
                 message: "function `println` does not return a value".to_string(),
             });
+        }
+
+        if call.name == "dealloc" {
+            return Err(RuntimeError {
+                message: "function `dealloc` does not return a value".to_string(),
+            });
+        }
+
+        if call.name == "alloc" {
+            return self.evaluate_alloc(call, variables);
         }
 
         self.call_function(&call.name, &call.arguments, variables)?
@@ -352,6 +407,87 @@ impl<'program> Runtime<'program> {
         self.output.push_str(&value.printable());
         self.output.push('\n');
         Ok(())
+    }
+
+    fn evaluate_alloc(
+        &mut self,
+        call: &CallExpression,
+        variables: &HashMap<String, Value>,
+    ) -> Result<Value, RuntimeError> {
+        if call.arguments.len() != 1 {
+            return Err(RuntimeError {
+                message: "function `alloc` expects 1 argument".to_string(),
+            });
+        }
+
+        let value = self.evaluate(&call.arguments[0], variables)?;
+        Ok(self.allocate(value))
+    }
+
+    fn evaluate_alloc_as(
+        &mut self,
+        call: &CallExpression,
+        ty: Type,
+        variables: &HashMap<String, Value>,
+    ) -> Result<Value, RuntimeError> {
+        let Type::Pointer(target_ty) = ty else {
+            return Err(RuntimeError {
+                message: "function `alloc` returns a pointer".to_string(),
+            });
+        };
+
+        if call.arguments.len() != 1 {
+            return Err(RuntimeError {
+                message: "function `alloc` expects 1 argument".to_string(),
+            });
+        }
+
+        let value = self.evaluate_as(&call.arguments[0], *target_ty, variables)?;
+        Ok(self.allocate(value))
+    }
+
+    fn evaluate_dealloc(
+        &mut self,
+        call: &CallExpression,
+        variables: &HashMap<String, Value>,
+    ) -> Result<(), RuntimeError> {
+        if call.arguments.len() != 1 {
+            return Err(RuntimeError {
+                message: "function `dealloc` expects 1 argument".to_string(),
+            });
+        }
+
+        let value = self.evaluate(&call.arguments[0], variables)?;
+
+        match value {
+            Value::Pointer(PointerValue::Heap { allocation, .. }) => {
+                if self.heap.remove(&allocation).is_some() {
+                    Ok(())
+                } else {
+                    Err(RuntimeError {
+                        message: "allocation is already freed".to_string(),
+                    })
+                }
+            }
+            Value::Pointer(PointerValue::Reference(_)) => Err(RuntimeError {
+                message: "function `dealloc` expects pointer returned by `alloc`".to_string(),
+            }),
+            value => Err(RuntimeError {
+                message: format!(
+                    "function `dealloc` expects pointer, found `{}`",
+                    value.ty().name()
+                ),
+            }),
+        }
+    }
+
+    fn allocate(&mut self, value: Value) -> Value {
+        let allocation = self.next_allocation;
+        let ty = value.ty();
+        self.next_allocation += 1;
+        self.heap.insert(allocation, value);
+
+        Value::Pointer(PointerValue::Heap { allocation, ty })
     }
 
     fn evaluate_struct_literal(
@@ -424,22 +560,10 @@ impl<'program> Runtime<'program> {
                 .ok_or_else(|| RuntimeError {
                     message: format!("unknown field `{}` in `{name}`", access.field),
                 }),
-            Value::Pointer(value) => match *value {
-                Value::Struct { name, fields } => fields
-                    .into_iter()
-                    .find(|(field, _)| field == &access.field)
-                    .map(|(_, value)| value)
-                    .ok_or_else(|| RuntimeError {
-                        message: format!("unknown field `{}` in `{name}`", access.field),
-                    }),
-                value => Err(RuntimeError {
-                    message: format!(
-                        "cannot access field `{}` on `{}`",
-                        access.field,
-                        value.ty().name()
-                    ),
-                }),
-            },
+            Value::Pointer(pointer) => {
+                let value = self.dereference_pointer(pointer)?;
+                self.get_field(value, &access.field)
+            }
             value => Err(RuntimeError {
                 message: format!(
                     "cannot access field `{}` on `{}`",
@@ -458,9 +582,37 @@ impl<'program> Runtime<'program> {
         let value = self.evaluate(expression, variables)?;
 
         match value {
-            Value::Pointer(value) => Ok(*value),
+            Value::Pointer(pointer) => self.dereference_pointer(pointer),
             value => Err(RuntimeError {
                 message: format!("cannot dereference `{}`", value.ty().name()),
+            }),
+        }
+    }
+
+    fn dereference_pointer(&self, pointer: PointerValue) -> Result<Value, RuntimeError> {
+        match pointer {
+            PointerValue::Reference(value) => Ok(*value),
+            PointerValue::Heap { allocation, .. } => self
+                .heap
+                .get(&allocation)
+                .cloned()
+                .ok_or_else(|| RuntimeError {
+                    message: "cannot dereference freed pointer".to_string(),
+                }),
+        }
+    }
+
+    fn get_field(&self, value: Value, field: &str) -> Result<Value, RuntimeError> {
+        match value {
+            Value::Struct { name, fields } => fields
+                .into_iter()
+                .find(|(field_name, _)| field_name == field)
+                .map(|(_, value)| value)
+                .ok_or_else(|| RuntimeError {
+                    message: format!("unknown field `{field}` in `{name}`"),
+                }),
+            value => Err(RuntimeError {
+                message: format!("cannot access field `{field}` on `{}`", value.ty().name()),
             }),
         }
     }
@@ -487,6 +639,10 @@ fn validate_type(
         Type::Pointer(ty) => validate_type(ty, structs),
         _ => Ok(()),
     }
+}
+
+fn is_builtin_function(name: &str) -> bool {
+    matches!(name, "println" | "alloc" | "dealloc")
 }
 
 fn expect_type(value: Value, ty: Type) -> Result<Value, RuntimeError> {
@@ -629,6 +785,49 @@ mod tests {
         .unwrap();
 
         assert_eq!(run_main(&program).unwrap(), "9\n");
+    }
+
+    #[test]
+    fn allocates_and_deallocates_value() {
+        let program =
+            parse_source("fn main() { let p: &i32 = alloc(7) println(*p) dealloc(p) }").unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "7\n");
+    }
+
+    #[test]
+    fn alloc_uses_expected_pointer_type() {
+        let program =
+            parse_source("fn main() { let p: &u8 = alloc(7) println(*p) dealloc(p) }").unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "7\n");
+    }
+
+    #[test]
+    fn allocates_struct() {
+        let program = parse_source(
+            "struct Point { x: i32 } fn main() { let p: &Point = alloc(Point { x: 9 }) println(p.x) dealloc(p) }",
+        )
+        .unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "9\n");
+    }
+
+    #[test]
+    fn rejects_use_after_dealloc() {
+        let program =
+            parse_source("fn main() { let p: &i32 = alloc(7) dealloc(p) println(*p) }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(error.message.contains("freed pointer"));
+    }
+
+    #[test]
+    fn rejects_dealloc_of_reference() {
+        let program = parse_source("fn main() { let a: i32 = 7 dealloc(&a) }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(error.message.contains("pointer returned by `alloc`"));
     }
 
     #[test]
