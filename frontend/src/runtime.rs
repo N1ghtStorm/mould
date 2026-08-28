@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{
     BinaryExpression, BinaryOperator, CallExpression, Expression, FieldAccess, Function, Program,
-    Statement::{self, Call, Let, Return},
+    Statement::{self, Call, If, Let, Return},
     StructDefinition, StructLiteral, Type,
 };
 
@@ -238,10 +238,17 @@ impl<'program> Runtime<'program> {
         function: &Function,
         variables: &mut HashMap<String, Value>,
     ) -> Result<Option<Value>, RuntimeError> {
-        for statement in &function.body.statements {
-            if let Some(value) =
-                self.run_statement(statement, function.return_type.clone(), variables)?
-            {
+        self.run_block(&function.body, function.return_type.clone(), variables)
+    }
+
+    fn run_block(
+        &mut self,
+        block: &crate::Block,
+        return_type: Option<Type>,
+        variables: &mut HashMap<String, Value>,
+    ) -> Result<Option<Value>, RuntimeError> {
+        for statement in &block.statements {
+            if let Some(value) = self.run_statement(statement, return_type.clone(), variables)? {
                 return Ok(Some(value));
             }
         }
@@ -278,6 +285,25 @@ impl<'program> Runtime<'program> {
                 };
 
                 self.evaluate_as(&statement.value, ty, variables).map(Some)
+            }
+            If(statement) => {
+                let condition = self.evaluate_as(&statement.condition, Type::Bool, variables)?;
+                let Value::Bool(condition) = condition else {
+                    unreachable!("bool type is stored as bool value");
+                };
+
+                let block = if condition {
+                    Some(&statement.then_block)
+                } else {
+                    statement.else_block.as_ref()
+                };
+
+                if let Some(block) = block {
+                    let mut block_variables = variables.clone();
+                    return self.run_block(block, return_type, &mut block_variables);
+                }
+
+                Ok(None)
             }
         }
     }
@@ -367,6 +393,15 @@ impl<'program> Runtime<'program> {
         binary: &BinaryExpression,
         variables: &HashMap<String, Value>,
     ) -> Result<Value, RuntimeError> {
+        match binary.operator {
+            BinaryOperator::BoolAnd => return self.evaluate_bool_and(binary, variables),
+            BinaryOperator::BoolOr => return self.evaluate_bool_or(binary, variables),
+            BinaryOperator::Equal | BinaryOperator::NotEqual => {
+                return self.evaluate_equality(binary, variables);
+            }
+            _ => {}
+        }
+
         if is_untyped_numeric_literal(&binary.left) && !is_untyped_numeric_literal(&binary.right) {
             let right = self.evaluate(&binary.right, variables)?;
             let ty = right.ty();
@@ -388,11 +423,85 @@ impl<'program> Runtime<'program> {
         ty: Type,
         variables: &HashMap<String, Value>,
     ) -> Result<Value, RuntimeError> {
+        if binary.operator.result_is_bool() {
+            let value = self.evaluate_binary(binary, variables)?;
+            return expect_type(value, ty);
+        }
+
         ensure_binary_operator(binary.operator, &ty)?;
         let left = self.evaluate_as(&binary.left, ty.clone(), variables)?;
         let right = self.evaluate_as(&binary.right, ty, variables)?;
 
         apply_binary_operator(left, binary.operator, right)
+    }
+
+    fn evaluate_bool_and(
+        &mut self,
+        binary: &BinaryExpression,
+        variables: &HashMap<String, Value>,
+    ) -> Result<Value, RuntimeError> {
+        let left = self.evaluate_as(&binary.left, Type::Bool, variables)?;
+        let Value::Bool(left) = left else {
+            unreachable!("bool type is stored as bool value");
+        };
+
+        if !left {
+            return Ok(Value::Bool(false));
+        }
+
+        let right = self.evaluate_as(&binary.right, Type::Bool, variables)?;
+        let Value::Bool(right) = right else {
+            unreachable!("bool type is stored as bool value");
+        };
+
+        Ok(Value::Bool(right))
+    }
+
+    fn evaluate_bool_or(
+        &mut self,
+        binary: &BinaryExpression,
+        variables: &HashMap<String, Value>,
+    ) -> Result<Value, RuntimeError> {
+        let left = self.evaluate_as(&binary.left, Type::Bool, variables)?;
+        let Value::Bool(left) = left else {
+            unreachable!("bool type is stored as bool value");
+        };
+
+        if left {
+            return Ok(Value::Bool(true));
+        }
+
+        let right = self.evaluate_as(&binary.right, Type::Bool, variables)?;
+        let Value::Bool(right) = right else {
+            unreachable!("bool type is stored as bool value");
+        };
+
+        Ok(Value::Bool(right))
+    }
+
+    fn evaluate_equality(
+        &mut self,
+        binary: &BinaryExpression,
+        variables: &HashMap<String, Value>,
+    ) -> Result<Value, RuntimeError> {
+        let (left, right) = if is_untyped_numeric_literal(&binary.left)
+            && !is_untyped_numeric_literal(&binary.right)
+        {
+            let right = self.evaluate(&binary.right, variables)?;
+            let left = self.evaluate_as(&binary.left, right.ty(), variables)?;
+            (left, right)
+        } else {
+            let left = self.evaluate(&binary.left, variables)?;
+            let right = self.evaluate_as(&binary.right, left.ty(), variables)?;
+            (left, right)
+        };
+
+        let equals = left == right;
+        Ok(Value::Bool(if binary.operator == BinaryOperator::Equal {
+            equals
+        } else {
+            !equals
+        }))
     }
 
     fn evaluate_bit_not(
@@ -410,7 +519,10 @@ impl<'program> Runtime<'program> {
         ty: Type,
         variables: &HashMap<String, Value>,
     ) -> Result<Value, RuntimeError> {
-        ensure_integer_operator("!", &ty)?;
+        if !ty.is_bool() {
+            ensure_integer_operator("!", &ty)?;
+        }
+
         let value = self.evaluate_as(expression, ty, variables)?;
         apply_bit_not_operator(value)
     }
@@ -696,6 +808,19 @@ fn validate_statement_types(
 ) -> Result<(), RuntimeError> {
     match statement {
         Let(statement) => validate_type(&statement.ty, structs),
+        If(statement) => {
+            for statement in &statement.then_block.statements {
+                validate_statement_types(statement, structs)?;
+            }
+
+            if let Some(block) = &statement.else_block {
+                for statement in &block.statements {
+                    validate_statement_types(statement, structs)?;
+                }
+            }
+
+            Ok(())
+        }
         Call(_) | Return(_) => Ok(()),
     }
 }
@@ -782,6 +907,7 @@ fn apply_integer_operator(
         | BinaryOperator::BitXor
         | BinaryOperator::ShiftLeft
         | BinaryOperator::ShiftRight => apply_integer_bitwise_operator(left, operator, right, ty),
+        _ => unreachable!("checked by caller"),
     }
 }
 
@@ -963,7 +1089,20 @@ fn apply_float_operator(
 
 fn apply_bit_not_operator(value: Value) -> Result<Value, RuntimeError> {
     let ty = value.ty();
-    ensure_integer_operator("!", &ty)?;
+
+    if ty.is_bool() {
+        let Value::Bool(value) = value else {
+            unreachable!("bool type is stored as bool value");
+        };
+
+        return Ok(Value::Bool(!value));
+    }
+
+    if !ty.is_integer() {
+        return Err(RuntimeError {
+            message: format!("operator `!` cannot be used with `{}`", ty.name()),
+        });
+    }
 
     let Value::Integer { value, ty } = value else {
         unreachable!("integer type is stored as integer value");
@@ -1118,6 +1257,13 @@ fn is_untyped_numeric_literal(expression: &Expression) -> bool {
 }
 
 impl BinaryOperator {
+    fn result_is_bool(self) -> bool {
+        matches!(
+            self,
+            Self::BoolAnd | Self::BoolOr | Self::Equal | Self::NotEqual
+        )
+    }
+
     fn is_bitwise(self) -> bool {
         matches!(
             self,
@@ -1136,6 +1282,10 @@ impl BinaryOperator {
             Self::BitXor => "^",
             Self::ShiftLeft => "<<",
             Self::ShiftRight => ">>",
+            Self::BoolAnd => "&&",
+            Self::BoolOr => "||",
+            Self::Equal => "==",
+            Self::NotEqual => "!=",
         }
     }
 }
@@ -1348,14 +1498,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bit_not_bool() {
-        let program = parse_source("fn main() { let value: bool = !true }").unwrap();
+    fn rejects_bit_not_float() {
+        let program = parse_source("fn main() { let value: f64 = !1.5 }").unwrap();
         let error = run_main(&program).unwrap_err();
 
         assert!(
             error
                 .message
-                .contains("operator `!` cannot be used with `bool`")
+                .contains("operator `!` cannot be used with `f64`")
         );
     }
 
@@ -1365,6 +1515,104 @@ mod tests {
         let error = run_main(&program).unwrap_err();
 
         assert!(error.message.contains("shift amount must be less"));
+    }
+
+    #[test]
+    fn evaluates_bool_operators() {
+        let program = parse_source(
+            "fn main() { println(true && false) println(true || false) println(!true) }",
+        )
+        .unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "false\ntrue\nfalse\n");
+    }
+
+    #[test]
+    fn evaluates_equality_operators() {
+        let program = parse_source(
+            "fn main() { let a: u8 = 7 println(a == 7) println(a != 8) println(true == false) }",
+        )
+        .unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "true\ntrue\nfalse\n");
+    }
+
+    #[test]
+    fn runs_if_then_branch() {
+        let program =
+            parse_source("fn main() { if true { println(1) } else { println(2) } }").unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "1\n");
+    }
+
+    #[test]
+    fn runs_if_else_branch() {
+        let program =
+            parse_source("fn main() { if false { println(1) } else { println(2) } }").unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "2\n");
+    }
+
+    #[test]
+    fn runs_else_if_branch() {
+        let program = parse_source(
+            "fn main() { if false { println(1) } else if true { println(2) } else { println(3) } }",
+        )
+        .unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "2\n");
+    }
+
+    #[test]
+    fn returns_from_if_branch() {
+        let program = parse_source(
+            "fn pick(flag: bool) -> i32 { if flag { return 1 } else { return 2 } } fn main() { println(pick(false)) }",
+        )
+        .unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "2\n");
+    }
+
+    #[test]
+    fn short_circuits_bool_operators() {
+        let program =
+            parse_source("fn main() { println(false && missing()) println(true || missing()) }")
+                .unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "false\ntrue\n");
+    }
+
+    #[test]
+    fn rejects_non_bool_if_condition() {
+        let program = parse_source("fn main() { if 1 { println(1) } }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(
+            error
+                .message
+                .contains("cannot assign integer literal to `bool`")
+        );
+    }
+
+    #[test]
+    fn rejects_bool_operator_with_integer() {
+        let program = parse_source("fn main() { let value: bool = 1 && 2 }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(
+            error
+                .message
+                .contains("cannot assign integer literal to `bool`")
+        );
+    }
+
+    #[test]
+    fn rejects_equality_with_mismatched_types() {
+        let program =
+            parse_source("fn main() { let a: i32 = 1 let b: u32 = 1 println(a == b) }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(error.message.contains("cannot use `u32` value as `i32`"));
     }
 
     #[test]

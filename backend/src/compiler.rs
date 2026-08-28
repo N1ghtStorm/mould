@@ -227,6 +227,14 @@ mod tests {
     }
 
     #[test]
+    fn emits_if_branch_result() {
+        let assembly =
+            compile("fn main() { if true && !false { println(1) } else { println(2) } }");
+
+        assert!(assembly.contains(".asciz \"1\""));
+    }
+
+    #[test]
     fn rejects_use_after_dealloc() {
         let error = compile_error("fn main() { let p: &i32 = alloc(7) dealloc(p) println(*p) }");
 

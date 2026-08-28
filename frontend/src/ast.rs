@@ -40,6 +40,7 @@ pub enum Statement {
     Let(LetStatement),
     Call(CallStatement),
     Return(ReturnStatement),
+    If(IfStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +59,13 @@ pub struct CallStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReturnStatement {
     pub value: Expression,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfStatement {
+    pub condition: Expression,
+    pub then_block: Block,
+    pub else_block: Option<Block>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,6 +246,10 @@ pub enum BinaryOperator {
     BitXor,
     ShiftLeft,
     ShiftRight,
+    BoolAnd,
+    BoolOr,
+    Equal,
+    NotEqual,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

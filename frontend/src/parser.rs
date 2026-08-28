@@ -1,8 +1,9 @@
 use crate::{
     ast::{
         BinaryExpression, BinaryOperator, Block, CallExpression, CallStatement, Expression,
-        FieldAccess, Function, FunctionParameter, LetStatement, Program, ReturnStatement,
-        Statement, StructDefinition, StructField, StructLiteral, StructLiteralField, Type,
+        FieldAccess, Function, FunctionParameter, IfStatement, LetStatement, Program,
+        ReturnStatement, Statement, StructDefinition, StructField, StructLiteral,
+        StructLiteralField, Type,
     },
     lexer::{LexError, Span, Token, TokenKind, lex},
 };
@@ -30,6 +31,7 @@ pub fn parse_source(source: &str) -> Result<Program, ParseError> {
 struct Parser {
     tokens: Vec<Token>,
     position: usize,
+    allow_struct_literals: bool,
 }
 
 impl Parser {
@@ -37,6 +39,7 @@ impl Parser {
         Self {
             tokens,
             position: 0,
+            allow_struct_literals: true,
         }
     }
 
@@ -155,6 +158,7 @@ impl Parser {
             TokenKind::Let => self.parse_let_statement().map(Statement::Let),
             TokenKind::Ident(_) => self.parse_call_statement().map(Statement::Call),
             TokenKind::Return => self.parse_return_statement().map(Statement::Return),
+            TokenKind::If => self.parse_if_statement().map(Statement::If),
             _ => Err(ParseError {
                 message: format!(
                     "expected statement, found {}",
@@ -193,6 +197,41 @@ impl Parser {
         self.eat(TokenKind::Semicolon);
 
         Ok(ReturnStatement { value })
+    }
+
+    fn parse_if_statement(&mut self) -> Result<IfStatement, ParseError> {
+        self.expect_simple(TokenKind::If, "`if`")?;
+        self.parse_if_statement_after_if()
+    }
+
+    fn parse_if_statement_after_if(&mut self) -> Result<IfStatement, ParseError> {
+        let condition = self.parse_if_condition()?;
+        let then_block = self.parse_block()?;
+        let else_block = if self.eat(TokenKind::Else) {
+            if self.eat(TokenKind::If) {
+                Some(Block {
+                    statements: vec![Statement::If(self.parse_if_statement_after_if()?)],
+                })
+            } else {
+                Some(self.parse_block()?)
+            }
+        } else {
+            None
+        };
+
+        Ok(IfStatement {
+            condition,
+            then_block,
+            else_block,
+        })
+    }
+
+    fn parse_if_condition(&mut self) -> Result<Expression, ParseError> {
+        let allow_struct_literals = self.allow_struct_literals;
+        self.allow_struct_literals = false;
+        let condition = self.parse_expression();
+        self.allow_struct_literals = allow_struct_literals;
+        condition
     }
 
     fn parse_call_expression(&mut self) -> Result<CallExpression, ParseError> {
@@ -245,7 +284,60 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Result<Expression, ParseError> {
-        self.parse_bit_or_expression()
+        self.parse_bool_or_expression()
+    }
+
+    fn parse_bool_or_expression(&mut self) -> Result<Expression, ParseError> {
+        let mut expression = self.parse_bool_and_expression()?;
+
+        while self.eat(TokenKind::DoublePipe) {
+            let right = self.parse_bool_and_expression()?;
+            expression = Expression::Binary(Box::new(BinaryExpression {
+                left: expression,
+                operator: BinaryOperator::BoolOr,
+                right,
+            }));
+        }
+
+        Ok(expression)
+    }
+
+    fn parse_bool_and_expression(&mut self) -> Result<Expression, ParseError> {
+        let mut expression = self.parse_equality_expression()?;
+
+        while self.eat(TokenKind::DoubleAmpersand) {
+            let right = self.parse_equality_expression()?;
+            expression = Expression::Binary(Box::new(BinaryExpression {
+                left: expression,
+                operator: BinaryOperator::BoolAnd,
+                right,
+            }));
+        }
+
+        Ok(expression)
+    }
+
+    fn parse_equality_expression(&mut self) -> Result<Expression, ParseError> {
+        let mut expression = self.parse_bit_or_expression()?;
+
+        loop {
+            let operator = if self.eat(TokenKind::EqualEqual) {
+                BinaryOperator::Equal
+            } else if self.eat(TokenKind::BangEqual) {
+                BinaryOperator::NotEqual
+            } else {
+                break;
+            };
+            let right = self.parse_bit_or_expression()?;
+
+            expression = Expression::Binary(Box::new(BinaryExpression {
+                left: expression,
+                operator,
+                right,
+            }));
+        }
+
+        Ok(expression)
     }
 
     fn parse_bit_or_expression(&mut self) -> Result<Expression, ParseError> {
@@ -426,7 +518,9 @@ impl Parser {
             TokenKind::Ident(_) if self.next_at(&TokenKind::LeftParen) => {
                 self.parse_call_expression().map(Expression::Call)
             }
-            TokenKind::Ident(_) if self.next_at(&TokenKind::LeftBrace) => {
+            TokenKind::Ident(_)
+                if self.allow_struct_literals && self.next_at(&TokenKind::LeftBrace) =>
+            {
                 self.parse_struct_literal().map(Expression::StructLiteral)
             }
             TokenKind::Ident(name) => {
@@ -531,6 +625,8 @@ impl Parser {
 fn describe_kind(kind: &TokenKind) -> String {
     match kind {
         TokenKind::Fn => "`fn`".to_string(),
+        TokenKind::If => "`if`".to_string(),
+        TokenKind::Else => "`else`".to_string(),
         TokenKind::Let => "`let`".to_string(),
         TokenKind::Pub => "`pub`".to_string(),
         TokenKind::Return => "`return`".to_string(),
@@ -545,9 +641,12 @@ fn describe_kind(kind: &TokenKind) -> String {
         TokenKind::LeftBrace => "`{`".to_string(),
         TokenKind::RightBrace => "`}`".to_string(),
         TokenKind::Ampersand => "`&`".to_string(),
+        TokenKind::DoubleAmpersand => "`&&`".to_string(),
         TokenKind::Pipe => "`|`".to_string(),
+        TokenKind::DoublePipe => "`||`".to_string(),
         TokenKind::Caret => "`^`".to_string(),
         TokenKind::Bang => "`!`".to_string(),
+        TokenKind::BangEqual => "`!=`".to_string(),
         TokenKind::Colon => "`:`".to_string(),
         TokenKind::Comma => "`,`".to_string(),
         TokenKind::Dot => "`.`".to_string(),
@@ -559,6 +658,7 @@ fn describe_kind(kind: &TokenKind) -> String {
         TokenKind::RightShift => "`>>`".to_string(),
         TokenKind::Arrow => "`->`".to_string(),
         TokenKind::Equal => "`=`".to_string(),
+        TokenKind::EqualEqual => "`==`".to_string(),
         TokenKind::Semicolon => "`;`".to_string(),
         TokenKind::Eof => "end of file".to_string(),
     }
@@ -948,6 +1048,77 @@ mod tests {
                                     right: Expression::Integer(1),
                                 })),
                             })),
+                        })),
+                    })),
+                })),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_if_else_statement() {
+        let program =
+            parse_source("fn main() { if true { println(1) } else { println(2) } }").unwrap();
+        let statement = &program.functions[0].body.statements[0];
+
+        assert_eq!(
+            statement,
+            &Statement::If(crate::IfStatement {
+                condition: Expression::Bool(true),
+                then_block: crate::Block {
+                    statements: vec![Statement::Call(crate::CallStatement {
+                        name: "println".to_string(),
+                        arguments: vec![Expression::Integer(1)],
+                    })],
+                },
+                else_block: Some(crate::Block {
+                    statements: vec![Statement::Call(crate::CallStatement {
+                        name: "println".to_string(),
+                        arguments: vec![Expression::Integer(2)],
+                    })],
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_else_if_statement() {
+        let program = parse_source(
+            "fn main() { if false { println(1) } else if true { println(2) } else { println(3) } }",
+        )
+        .unwrap();
+        let statement = &program.functions[0].body.statements[0];
+
+        let Statement::If(statement) = statement else {
+            panic!("expected if statement");
+        };
+        let else_block = statement.else_block.as_ref().unwrap();
+
+        assert!(matches!(else_block.statements[0], Statement::If(_)));
+    }
+
+    #[test]
+    fn parses_bool_operators_with_precedence() {
+        let program =
+            parse_source("fn main() { let value: bool = true || false && !false == true }")
+                .unwrap();
+        let statement = &program.functions[0].body.statements[0];
+
+        assert_eq!(
+            statement,
+            &Statement::Let(crate::LetStatement {
+                name: "value".to_string(),
+                ty: Type::Bool,
+                value: Expression::Binary(Box::new(BinaryExpression {
+                    left: Expression::Bool(true),
+                    operator: BinaryOperator::BoolOr,
+                    right: Expression::Binary(Box::new(BinaryExpression {
+                        left: Expression::Bool(false),
+                        operator: BinaryOperator::BoolAnd,
+                        right: Expression::Binary(Box::new(BinaryExpression {
+                            left: Expression::BitNot(Box::new(Expression::Bool(false))),
+                            operator: BinaryOperator::Equal,
+                            right: Expression::Bool(true),
                         })),
                     })),
                 })),

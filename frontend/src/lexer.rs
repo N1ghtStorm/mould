@@ -15,6 +15,8 @@ pub struct Token {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenKind {
     Fn,
+    If,
+    Else,
     Let,
     Pub,
     Return,
@@ -29,9 +31,12 @@ pub enum TokenKind {
     LeftBrace,
     RightBrace,
     Ampersand,
+    DoubleAmpersand,
     Pipe,
+    DoublePipe,
     Caret,
     Bang,
+    BangEqual,
     Colon,
     Comma,
     Dot,
@@ -43,6 +48,7 @@ pub enum TokenKind {
     RightShift,
     Arrow,
     Equal,
+    EqualEqual,
     Semicolon,
     Eof,
 }
@@ -81,9 +87,18 @@ impl Lexer<'_> {
                 ')' => self.push_single(TokenKind::RightParen),
                 '{' => self.push_single(TokenKind::LeftBrace),
                 '}' => self.push_single(TokenKind::RightBrace),
+                '&' if self.peek_next() == Some('&') => {
+                    self.push_double(TokenKind::DoubleAmpersand);
+                }
                 '&' => self.push_single(TokenKind::Ampersand),
+                '|' if self.peek_next() == Some('|') => {
+                    self.push_double(TokenKind::DoublePipe);
+                }
                 '|' => self.push_single(TokenKind::Pipe),
                 '^' => self.push_single(TokenKind::Caret),
+                '!' if self.peek_next() == Some('=') => {
+                    self.push_double(TokenKind::BangEqual);
+                }
                 '!' => self.push_single(TokenKind::Bang),
                 ':' => self.push_single(TokenKind::Colon),
                 ',' => self.push_single(TokenKind::Comma),
@@ -101,6 +116,9 @@ impl Lexer<'_> {
                     self.push_double(TokenKind::Arrow);
                 }
                 '-' => self.push_single(TokenKind::Minus),
+                '=' if self.peek_next() == Some('=') => {
+                    self.push_double(TokenKind::EqualEqual);
+                }
                 '=' => self.push_single(TokenKind::Equal),
                 ';' => self.push_single(TokenKind::Semicolon),
                 ch if is_ident_start(ch) => self.lex_identifier(),
@@ -144,6 +162,8 @@ impl Lexer<'_> {
         let text = &self.source[start..self.position];
         let kind = match (text, Type::from_name(text)) {
             ("fn", _) => TokenKind::Fn,
+            ("if", _) => TokenKind::If,
+            ("else", _) => TokenKind::Else,
             ("let", _) => TokenKind::Let,
             ("pub", _) => TokenKind::Pub,
             ("return", _) => TokenKind::Return,
