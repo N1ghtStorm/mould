@@ -12,6 +12,8 @@ use frontend::{
     Statement::{self, Call, Let},
 };
 
+const PRINTLN_I32_FORMAT_LABEL: &str = "L_mould_println_i32_format";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
     pub message: String,
@@ -40,15 +42,21 @@ pub fn compile_program_to_executable(
     program: &Program,
     output_path: &Path,
 ) -> Result<(), CompileError> {
-    let c_source = compile_program_to_c(program)?;
-    let c_path = temporary_c_path();
+    if !cfg!(target_os = "macos") || !cfg!(target_arch = "aarch64") {
+        return Err(CompileError {
+            message: "native backend currently supports only macOS arm64".to_string(),
+        });
+    }
 
-    fs::write(&c_path, c_source).map_err(|error| CompileError {
-        message: format!("failed to write `{}`: {error}", c_path.display()),
+    let assembly = compile_program_to_assembly(program)?;
+    let assembly_path = temporary_assembly_path();
+
+    fs::write(&assembly_path, assembly).map_err(|error| CompileError {
+        message: format!("failed to write `{}`: {error}", assembly_path.display()),
     })?;
 
     let output = Command::new("cc")
-        .arg(&c_path)
+        .arg(&assembly_path)
         .arg("-o")
         .arg(output_path)
         .output()
@@ -56,7 +64,7 @@ pub fn compile_program_to_executable(
             message: format!("failed to run `cc`: {error}"),
         })?;
 
-    let _ = fs::remove_file(&c_path);
+    let _ = fs::remove_file(&assembly_path);
 
     if output.status.success() {
         return Ok(());
@@ -64,13 +72,13 @@ pub fn compile_program_to_executable(
 
     Err(CompileError {
         message: format!(
-            "native compiler failed: {}",
+            "assembler/linker failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ),
     })
 }
 
-pub fn compile_program_to_c(program: &Program) -> Result<String, CompileError> {
+pub fn compile_program_to_assembly(program: &Program) -> Result<String, CompileError> {
     let known_functions = collect_functions(program)?;
 
     if !known_functions.contains("main") {
@@ -80,29 +88,27 @@ pub fn compile_program_to_c(program: &Program) -> Result<String, CompileError> {
     }
 
     let mut output = String::new();
-    output.push_str("#include <stdint.h>\n");
-    output.push_str("#include <stdio.h>\n\n");
-
-    for function in &program.functions {
-        writeln!(
-            output,
-            "static void {}(void);",
-            c_function_name(&function.name)
-        )
-        .unwrap();
-    }
-
-    output.push('\n');
+    output.push_str(".build_version macos, 11, 0\n");
+    output.push_str(".section __TEXT,__cstring,cstring_literals\n");
+    writeln!(output, "{PRINTLN_I32_FORMAT_LABEL}:").unwrap();
+    output.push_str("    .asciz \"%d\\n\"\n\n");
+    output.push_str(".section __TEXT,__text,regular,pure_instructions\n\n");
 
     for function in &program.functions {
         emit_function(&mut output, function, &known_functions)?;
         output.push('\n');
     }
 
-    output.push_str("int main(void) {\n");
-    output.push_str("    mould_fn_main();\n");
-    output.push_str("    return 0;\n");
-    output.push_str("}\n");
+    output.push_str(".globl _main\n");
+    output.push_str(".p2align 2\n");
+    output.push_str("_main:\n");
+    output.push_str("    stp x29, x30, [sp, #-16]!\n");
+    output.push_str("    mov x29, sp\n");
+    output.push_str("    bl _mould_fn_main\n");
+    output.push_str("    mov w0, #0\n");
+    output.push_str("    ldp x29, x30, [sp], #16\n");
+    output.push_str("    ret\n\n");
+    output.push_str(".subsections_via_symbols\n");
 
     Ok(output)
 }
@@ -132,12 +138,16 @@ fn emit_function(
     function: &Function,
     known_functions: &HashSet<String>,
 ) -> Result<(), CompileError> {
-    writeln!(
-        output,
-        "static void {}(void) {{",
-        c_function_name(&function.name)
-    )
-    .unwrap();
+    let stack_size = align_to_16(count_local_variables(function) * 4);
+
+    output.push_str(".p2align 2\n");
+    writeln!(output, "{}:", asm_function_name(&function.name)).unwrap();
+    output.push_str("    stp x29, x30, [sp, #-16]!\n");
+    output.push_str("    mov x29, sp\n");
+
+    if stack_size > 0 {
+        writeln!(output, "    sub sp, sp, #{stack_size}").unwrap();
+    }
 
     let mut compiler = FunctionCompiler::new(known_functions);
 
@@ -145,13 +155,27 @@ fn emit_function(
         compiler.emit_statement(output, statement)?;
     }
 
-    output.push_str("}\n");
+    if stack_size > 0 {
+        writeln!(output, "    add sp, sp, #{stack_size}").unwrap();
+    }
+
+    output.push_str("    ldp x29, x30, [sp], #16\n");
+    output.push_str("    ret\n");
     Ok(())
+}
+
+fn count_local_variables(function: &Function) -> usize {
+    function
+        .body
+        .statements
+        .iter()
+        .filter(|statement| matches!(statement, Let(_)))
+        .count()
 }
 
 struct FunctionCompiler<'program> {
     known_functions: &'program HashSet<String>,
-    variables: HashMap<String, String>,
+    variables: HashMap<String, usize>,
     next_variable: usize,
 }
 
@@ -180,16 +204,13 @@ impl<'program> FunctionCompiler<'program> {
         output: &mut String,
         statement: &LetStatement,
     ) -> Result<(), CompileError> {
-        let value = self.emit_expression(&statement.value)?;
-        let c_name = format!(
-            "{}_{}",
-            c_variable_name(&statement.name),
-            self.next_variable
-        );
+        self.emit_expression(output, &statement.value)?;
 
+        let offset = (self.next_variable + 1) * 4;
         self.next_variable += 1;
-        writeln!(output, "    int32_t {c_name} = {value};").unwrap();
-        self.variables.insert(statement.name.clone(), c_name);
+        self.emit_stack_address(output, offset)?;
+        output.push_str("    str w8, [x9]\n");
+        self.variables.insert(statement.name.clone(), offset);
 
         Ok(())
     }
@@ -215,7 +236,7 @@ impl<'program> FunctionCompiler<'program> {
             });
         }
 
-        writeln!(output, "    {}();", c_function_name(&statement.name)).unwrap();
+        writeln!(output, "    bl {}", asm_function_name(&statement.name)).unwrap();
         Ok(())
     }
 
@@ -230,36 +251,69 @@ impl<'program> FunctionCompiler<'program> {
             });
         }
 
-        let value = self.emit_expression(&statement.arguments[0])?;
-        writeln!(output, "    printf(\"%d\\n\", {value});").unwrap();
+        self.emit_expression(output, &statement.arguments[0])?;
+        output.push_str("    sub sp, sp, #16\n");
+        output.push_str("    sxtw x8, w8\n");
+        output.push_str("    str x8, [sp]\n");
+        writeln!(output, "    adrp x0, {PRINTLN_I32_FORMAT_LABEL}@PAGE").unwrap();
+        writeln!(output, "    add x0, x0, {PRINTLN_I32_FORMAT_LABEL}@PAGEOFF").unwrap();
+        output.push_str("    bl _printf\n");
+        output.push_str("    add sp, sp, #16\n");
 
         Ok(())
     }
 
-    fn emit_expression(&self, expression: &Expression) -> Result<String, CompileError> {
+    fn emit_expression(
+        &self,
+        output: &mut String,
+        expression: &Expression,
+    ) -> Result<(), CompileError> {
         match expression {
-            Expression::Integer(value) => Ok(value.to_string()),
+            Expression::Integer(value) => {
+                emit_load_i32(output, *value);
+                Ok(())
+            }
             Expression::Variable(name) => {
-                self.variables
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| CompileError {
-                        message: format!("variable `{name}` not found"),
-                    })
+                let offset = self.variables.get(name).ok_or_else(|| CompileError {
+                    message: format!("variable `{name}` not found"),
+                })?;
+
+                self.emit_stack_address(output, *offset)?;
+                output.push_str("    ldr w8, [x9]\n");
+                Ok(())
             }
         }
     }
+
+    fn emit_stack_address(&self, output: &mut String, offset: usize) -> Result<(), CompileError> {
+        if offset > 4095 {
+            return Err(CompileError {
+                message: "function has too many local variables".to_string(),
+            });
+        }
+
+        writeln!(output, "    sub x9, x29, #{offset}").unwrap();
+        Ok(())
+    }
 }
 
-fn c_function_name(name: &str) -> String {
-    c_name("mould_fn_", name)
+fn emit_load_i32(output: &mut String, value: i32) {
+    let bits = value as u32;
+    let low = bits & 0xffff;
+    let high = bits >> 16;
+
+    writeln!(output, "    movz w8, #{low}").unwrap();
+
+    if high != 0 {
+        writeln!(output, "    movk w8, #{high}, lsl #16").unwrap();
+    }
 }
 
-fn c_variable_name(name: &str) -> String {
-    c_name("mould_var_", name)
+fn asm_function_name(name: &str) -> String {
+    asm_name("_mould_fn_", name)
 }
 
-fn c_name(prefix: &str, name: &str) -> String {
+fn asm_name(prefix: &str, name: &str) -> String {
     let mut output = prefix.to_string();
 
     for ch in name.chars() {
@@ -273,42 +327,48 @@ fn c_name(prefix: &str, name: &str) -> String {
     output
 }
 
-fn temporary_c_path() -> PathBuf {
+fn align_to_16(value: usize) -> usize {
+    (value + 15) & !15
+}
+
+fn temporary_assembly_path() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
 
-    std::env::temp_dir().join(format!("mould-{}-{nanos}.c", std::process::id()))
+    std::env::temp_dir().join(format!("mould-{}-{nanos}.s", std::process::id()))
 }
 
 #[cfg(test)]
 mod tests {
     use frontend::parse_source;
 
-    use super::{CompileError, compile_program_to_c};
+    use super::{CompileError, compile_program_to_assembly};
 
     #[test]
     fn emits_println_number() {
-        let c_source = compile("fn main() { println(1) }");
+        let assembly = compile("fn main() { println(1) }");
 
-        assert!(c_source.contains("printf(\"%d\\n\", 1);"));
+        assert!(assembly.contains("movz w8, #1"));
+        assert!(assembly.contains("bl _printf"));
     }
 
     #[test]
     fn emits_variable_and_println() {
-        let c_source = compile("fn main() { let a: i32 = 1 println(a) }");
+        let assembly = compile("fn main() { let a: i32 = 1 println(a) }");
 
-        assert!(c_source.contains("int32_t mould_var_a_0 = 1;"));
-        assert!(c_source.contains("printf(\"%d\\n\", mould_var_a_0);"));
+        assert!(assembly.contains("sub sp, sp, #16"));
+        assert!(assembly.contains("str w8, [x9]"));
+        assert!(assembly.contains("ldr w8, [x9]"));
     }
 
     #[test]
     fn emits_user_function_call() {
-        let c_source = compile("fn helper() { println(1) } fn main() { helper() }");
+        let assembly = compile("fn helper() { println(1) } fn main() { helper() }");
 
-        assert!(c_source.contains("static void mould_fn_helper(void);"));
-        assert!(c_source.contains("mould_fn_helper();"));
+        assert!(assembly.contains("_mould_fn_helper:"));
+        assert!(assembly.contains("bl _mould_fn_helper"));
     }
 
     #[test]
@@ -327,11 +387,11 @@ mod tests {
 
     fn compile(source: &str) -> String {
         let program = parse_source(source).unwrap();
-        compile_program_to_c(&program).unwrap()
+        compile_program_to_assembly(&program).unwrap()
     }
 
     fn compile_error(source: &str) -> CompileError {
         let program = parse_source(source).unwrap();
-        compile_program_to_c(&program).unwrap_err()
+        compile_program_to_assembly(&program).unwrap_err()
     }
 }
