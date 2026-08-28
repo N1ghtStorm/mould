@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use crate::{
-    CallExpression, Expression, Function, Program,
+    CallExpression, Expression, FieldAccess, Function, Program,
     Statement::{self, Call, Let, Return},
-    Type,
+    StructDefinition, StructLiteral, Type,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,16 +19,27 @@ pub fn run_main(program: &Program) -> Result<String, RuntimeError> {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Value {
-    Integer { value: u128, ty: Type },
-    Float { value: f64, ty: Type },
+    Integer {
+        value: u128,
+        ty: Type,
+    },
+    Float {
+        value: f64,
+        ty: Type,
+    },
     Bool(bool),
+    Struct {
+        name: String,
+        fields: Vec<(String, Value)>,
+    },
 }
 
 impl Value {
     fn ty(&self) -> Type {
         match self {
-            Self::Integer { ty, .. } | Self::Float { ty, .. } => *ty,
+            Self::Integer { ty, .. } | Self::Float { ty, .. } => ty.clone(),
             Self::Bool(_) => Type::Bool,
+            Self::Struct { name, .. } => Type::Struct(name.clone()),
         }
     }
 
@@ -37,17 +48,54 @@ impl Value {
             Self::Integer { value, .. } => value.to_string(),
             Self::Float { value, .. } => value.to_string(),
             Self::Bool(value) => value.to_string(),
+            Self::Struct { name, fields } => {
+                let fields = fields
+                    .iter()
+                    .map(|(name, value)| format!("{name}: {}", value.printable()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{name} {{ {fields} }}")
+            }
         }
     }
 }
 
 struct Runtime<'program> {
+    structs: HashMap<String, &'program StructDefinition>,
     functions: HashMap<String, &'program Function>,
     output: String,
 }
 
 impl<'program> Runtime<'program> {
     fn new(program: &'program Program) -> Result<Self, RuntimeError> {
+        let mut structs = HashMap::new();
+
+        for structure in &program.structs {
+            if Type::from_name(&structure.name).is_some() {
+                return Err(RuntimeError {
+                    message: format!("cannot define primitive type `{}`", structure.name),
+                });
+            }
+
+            if structs.insert(structure.name.clone(), structure).is_some() {
+                return Err(RuntimeError {
+                    message: format!("struct `{}` is already defined", structure.name),
+                });
+            }
+
+            let mut fields = HashMap::new();
+            for field in &structure.fields {
+                if fields.insert(field.name.clone(), ()).is_some() {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "field `{}` is already defined in struct `{}`",
+                            field.name, structure.name
+                        ),
+                    });
+                }
+            }
+        }
+
         let mut functions = HashMap::new();
 
         for function in &program.functions {
@@ -58,13 +106,40 @@ impl<'program> Runtime<'program> {
             }
         }
 
+        for structure in &program.structs {
+            for field in &structure.fields {
+                validate_type(&field.ty, &structs)?;
+            }
+        }
+
+        for function in &program.functions {
+            for parameter in &function.parameters {
+                validate_type(&parameter.ty, &structs)?;
+            }
+
+            if let Some(return_type) = &function.return_type {
+                validate_type(return_type, &structs)?;
+            }
+
+            for statement in &function.body.statements {
+                validate_statement_types(statement, &structs)?;
+            }
+        }
+
         Ok(Self {
+            structs,
             functions,
             output: String::new(),
         })
     }
 
     fn call_main(&mut self) -> Result<Option<Value>, RuntimeError> {
+        if !self.functions.contains_key("main") {
+            return Err(RuntimeError {
+                message: "function `main` not found".to_string(),
+            });
+        }
+
         self.call_function("main", &[], &HashMap::new())
     }
 
@@ -90,13 +165,13 @@ impl<'program> Runtime<'program> {
         let mut variables = HashMap::new();
 
         for (parameter, argument) in function.parameters.iter().zip(arguments) {
-            let value = self.evaluate_as(argument, parameter.ty, caller_variables)?;
+            let value = self.evaluate_as(argument, parameter.ty.clone(), caller_variables)?;
             variables.insert(parameter.name.clone(), value);
         }
 
         let returned = self.run_function(function, &mut variables)?;
 
-        match (function.return_type, returned) {
+        match (function.return_type.clone(), returned) {
             (Some(_), Some(value)) => Ok(Some(value)),
             (Some(ty), None) => Err(RuntimeError {
                 message: format!("function `{name}` must return `{}`", ty.name()),
@@ -114,7 +189,9 @@ impl<'program> Runtime<'program> {
         variables: &mut HashMap<String, Value>,
     ) -> Result<Option<Value>, RuntimeError> {
         for statement in &function.body.statements {
-            if let Some(value) = self.run_statement(statement, function.return_type, variables)? {
+            if let Some(value) =
+                self.run_statement(statement, function.return_type.clone(), variables)?
+            {
                 return Ok(Some(value));
             }
         }
@@ -130,7 +207,7 @@ impl<'program> Runtime<'program> {
     ) -> Result<Option<Value>, RuntimeError> {
         match statement {
             Let(statement) => {
-                let value = self.evaluate_as(&statement.value, statement.ty, variables)?;
+                let value = self.evaluate_as(&statement.value, statement.ty.clone(), variables)?;
                 variables.insert(statement.name.clone(), value);
                 Ok(None)
             }
@@ -170,6 +247,8 @@ impl<'program> Runtime<'program> {
                 })
             }
             Expression::Call(call) => self.evaluate_call_expression(call, variables),
+            Expression::StructLiteral(literal) => self.evaluate_struct_literal(literal, variables),
+            Expression::FieldAccess(access) => self.evaluate_field_access(access, variables),
         }
     }
 
@@ -199,6 +278,14 @@ impl<'program> Runtime<'program> {
             }
             Expression::Call(call) => {
                 let value = self.evaluate_call_expression(call, variables)?;
+                expect_type(value, ty)
+            }
+            Expression::StructLiteral(literal) => {
+                let value = self.evaluate_struct_literal(literal, variables)?;
+                expect_type(value, ty)
+            }
+            Expression::FieldAccess(access) => {
+                let value = self.evaluate_field_access(access, variables)?;
                 expect_type(value, ty)
             }
         }
@@ -249,6 +336,108 @@ impl<'program> Runtime<'program> {
         self.output.push_str(&value.printable());
         self.output.push('\n');
         Ok(())
+    }
+
+    fn evaluate_struct_literal(
+        &mut self,
+        literal: &StructLiteral,
+        variables: &HashMap<String, Value>,
+    ) -> Result<Value, RuntimeError> {
+        let definition = self
+            .structs
+            .get(&literal.name)
+            .copied()
+            .ok_or_else(|| RuntimeError {
+                message: format!("unknown struct `{}`", literal.name),
+            })?;
+        let field_types = definition
+            .fields
+            .iter()
+            .map(|field| (field.name.clone(), field.ty.clone()))
+            .collect::<Vec<_>>();
+        let mut values = HashMap::new();
+
+        for field in &literal.fields {
+            if values.contains_key(&field.name) {
+                return Err(RuntimeError {
+                    message: format!(
+                        "field `{}` is already initialized in `{}`",
+                        field.name, literal.name
+                    ),
+                });
+            }
+
+            let Some((_, ty)) = field_types.iter().find(|(name, _)| name == &field.name) else {
+                return Err(RuntimeError {
+                    message: format!("unknown field `{}` in `{}`", field.name, literal.name),
+                });
+            };
+            let value = self.evaluate_as(&field.value, ty.clone(), variables)?;
+            values.insert(field.name.clone(), value);
+        }
+
+        let mut fields = Vec::new();
+
+        for (field_name, _) in field_types {
+            let Some(value) = values.remove(&field_name) else {
+                return Err(RuntimeError {
+                    message: format!("missing field `{field_name}` in `{}`", literal.name),
+                });
+            };
+            fields.push((field_name, value));
+        }
+
+        Ok(Value::Struct {
+            name: literal.name.clone(),
+            fields,
+        })
+    }
+
+    fn evaluate_field_access(
+        &mut self,
+        access: &FieldAccess,
+        variables: &HashMap<String, Value>,
+    ) -> Result<Value, RuntimeError> {
+        let object = self.evaluate(&access.object, variables)?;
+
+        match object {
+            Value::Struct { name, fields } => fields
+                .into_iter()
+                .find(|(field, _)| field == &access.field)
+                .map(|(_, value)| value)
+                .ok_or_else(|| RuntimeError {
+                    message: format!("unknown field `{}` in `{name}`", access.field),
+                }),
+            value => Err(RuntimeError {
+                message: format!(
+                    "cannot access field `{}` on `{}`",
+                    access.field,
+                    value.ty().name()
+                ),
+            }),
+        }
+    }
+}
+
+fn validate_statement_types(
+    statement: &Statement,
+    structs: &HashMap<String, &StructDefinition>,
+) -> Result<(), RuntimeError> {
+    match statement {
+        Let(statement) => validate_type(&statement.ty, structs),
+        Call(_) | Return(_) => Ok(()),
+    }
+}
+
+fn validate_type(
+    ty: &Type,
+    structs: &HashMap<String, &StructDefinition>,
+) -> Result<(), RuntimeError> {
+    match ty {
+        Type::Struct(name) if !structs.contains_key(name) => Err(RuntimeError {
+            message: format!("unknown type `{name}`"),
+        }),
+        _ => Ok(()),
     }
 }
 
@@ -345,6 +534,26 @@ mod tests {
         let program = parse_source("fn log(a: i32) { println(a) } fn main() { log(8) }").unwrap();
 
         assert_eq!(run_main(&program).unwrap(), "8\n");
+    }
+
+    #[test]
+    fn reads_struct_field() {
+        let program = parse_source(
+            "struct Point { x: i32, y: bool } fn main() { let p: Point = Point { x: 7, y: true } println(p.x) println(p.y) }",
+        )
+        .unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "7\ntrue\n");
+    }
+
+    #[test]
+    fn passes_struct_to_function() {
+        let program = parse_source(
+            "struct Point { x: i32 } fn pick_x(p: Point) -> i32 { return p.x } fn main() { let p: Point = Point { x: 9 } println(pick_x(p)) }",
+        )
+        .unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "9\n");
     }
 
     #[test]

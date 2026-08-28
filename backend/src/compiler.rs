@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
@@ -7,11 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use frontend::{
-    CallExpression, Expression, Function, Program,
-    Statement::{self, Call, Let, Return},
-    Type,
-};
+use frontend::Program;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
@@ -78,241 +73,11 @@ pub fn compile_program_to_executable(
 }
 
 pub fn compile_program_to_assembly(program: &Program) -> Result<String, CompileError> {
-    let mut compiler = ProgramCompiler::new(program)?;
-    compiler.emit_main()?;
-    Ok(compiler.finish())
-}
+    let output = frontend::run_main(program).map_err(|error| CompileError {
+        message: error.message,
+    })?;
 
-struct ProgramCompiler<'program> {
-    functions: HashMap<String, &'program Function>,
-    emitter: AssemblyEmitter,
-}
-
-impl<'program> ProgramCompiler<'program> {
-    fn new(program: &'program Program) -> Result<Self, CompileError> {
-        let mut functions = HashMap::new();
-
-        for function in &program.functions {
-            if function.name == "println" {
-                return Err(CompileError {
-                    message: "cannot define builtin function `println`".to_string(),
-                });
-            }
-
-            if functions.insert(function.name.clone(), function).is_some() {
-                return Err(CompileError {
-                    message: format!("function `{}` is already defined", function.name),
-                });
-            }
-        }
-
-        Ok(Self {
-            functions,
-            emitter: AssemblyEmitter::new(),
-        })
-    }
-
-    fn emit_main(&mut self) -> Result<(), CompileError> {
-        if !self.functions.contains_key("main") {
-            return Err(CompileError {
-                message: "function `main` not found".to_string(),
-            });
-        }
-
-        self.call_function("main", &[], &HashMap::new())?;
-        Ok(())
-    }
-
-    fn call_function(
-        &mut self,
-        name: &str,
-        arguments: &[Expression],
-        caller_variables: &HashMap<String, Value>,
-    ) -> Result<Option<Value>, CompileError> {
-        let function = self
-            .functions
-            .get(name)
-            .copied()
-            .cloned()
-            .ok_or_else(|| CompileError {
-                message: format!("unknown function `{name}`"),
-            })?;
-
-        if function.parameters.len() != arguments.len() {
-            return Err(CompileError {
-                message: format!(
-                    "function `{name}` expects {} argument(s)",
-                    function.parameters.len()
-                ),
-            });
-        }
-
-        let mut variables = HashMap::new();
-
-        for (parameter, argument) in function.parameters.iter().zip(arguments) {
-            let value = self.evaluate_as(argument, parameter.ty, caller_variables)?;
-            variables.insert(parameter.name.clone(), value);
-        }
-
-        let returned = self.emit_function_body(&function, &mut variables)?;
-
-        match (function.return_type, returned) {
-            (Some(_), Some(value)) => Ok(Some(value)),
-            (Some(ty), None) => Err(CompileError {
-                message: format!("function `{name}` must return `{}`", ty.name()),
-            }),
-            (None, Some(_)) => Err(CompileError {
-                message: format!("function `{name}` cannot return a value"),
-            }),
-            (None, None) => Ok(None),
-        }
-    }
-
-    fn emit_function_body(
-        &mut self,
-        function: &Function,
-        variables: &mut HashMap<String, Value>,
-    ) -> Result<Option<Value>, CompileError> {
-        for statement in &function.body.statements {
-            if let Some(value) = self.emit_statement(statement, function.return_type, variables)? {
-                return Ok(Some(value));
-            }
-        }
-
-        Ok(None)
-    }
-
-    fn emit_statement(
-        &mut self,
-        statement: &Statement,
-        return_type: Option<Type>,
-        variables: &mut HashMap<String, Value>,
-    ) -> Result<Option<Value>, CompileError> {
-        match statement {
-            Let(statement) => {
-                let value = self.evaluate_as(&statement.value, statement.ty, variables)?;
-                variables.insert(statement.name.clone(), value);
-                Ok(None)
-            }
-            Call(statement) => {
-                let call = CallExpression {
-                    name: statement.name.clone(),
-                    arguments: statement.arguments.clone(),
-                };
-                self.evaluate_call_statement(&call, variables)?;
-                Ok(None)
-            }
-            Return(statement) => {
-                let Some(ty) = return_type else {
-                    return Err(CompileError {
-                        message: "cannot return a value from function without return type"
-                            .to_string(),
-                    });
-                };
-
-                self.evaluate_as(&statement.value, ty, variables).map(Some)
-            }
-        }
-    }
-
-    fn evaluate(
-        &mut self,
-        expression: &Expression,
-        variables: &HashMap<String, Value>,
-    ) -> Result<Value, CompileError> {
-        match expression {
-            Expression::Integer(value) => integer_value(*value, Type::I32),
-            Expression::Float(value) => float_value(value, Type::F64),
-            Expression::Bool(value) => Ok(Value::Bool(*value)),
-            Expression::Variable(name) => {
-                variables.get(name).cloned().ok_or_else(|| CompileError {
-                    message: format!("variable `{name}` not found"),
-                })
-            }
-            Expression::Call(call) => self.evaluate_call_expression(call, variables),
-        }
-    }
-
-    fn evaluate_as(
-        &mut self,
-        expression: &Expression,
-        ty: Type,
-        variables: &HashMap<String, Value>,
-    ) -> Result<Value, CompileError> {
-        match expression {
-            Expression::Integer(value) => integer_value(*value, ty),
-            Expression::Float(value) => float_value(value, ty),
-            Expression::Bool(value) => {
-                if ty.is_bool() {
-                    Ok(Value::Bool(*value))
-                } else {
-                    Err(CompileError {
-                        message: format!("cannot assign bool literal to `{}`", ty.name()),
-                    })
-                }
-            }
-            Expression::Variable(name) => {
-                let value = variables.get(name).cloned().ok_or_else(|| CompileError {
-                    message: format!("variable `{name}` not found"),
-                })?;
-                expect_type(value, ty)
-            }
-            Expression::Call(call) => {
-                let value = self.evaluate_call_expression(call, variables)?;
-                expect_type(value, ty)
-            }
-        }
-    }
-
-    fn evaluate_call_statement(
-        &mut self,
-        call: &CallExpression,
-        variables: &HashMap<String, Value>,
-    ) -> Result<(), CompileError> {
-        if call.name == "println" {
-            return self.evaluate_println(call, variables);
-        }
-
-        self.call_function(&call.name, &call.arguments, variables)?;
-        Ok(())
-    }
-
-    fn evaluate_call_expression(
-        &mut self,
-        call: &CallExpression,
-        variables: &HashMap<String, Value>,
-    ) -> Result<Value, CompileError> {
-        if call.name == "println" {
-            return Err(CompileError {
-                message: "function `println` does not return a value".to_string(),
-            });
-        }
-
-        self.call_function(&call.name, &call.arguments, variables)?
-            .ok_or_else(|| CompileError {
-                message: format!("function `{}` does not return a value", call.name),
-            })
-    }
-
-    fn evaluate_println(
-        &mut self,
-        call: &CallExpression,
-        variables: &HashMap<String, Value>,
-    ) -> Result<(), CompileError> {
-        if call.arguments.len() != 1 {
-            return Err(CompileError {
-                message: "function `println` expects 1 argument".to_string(),
-            });
-        }
-
-        let value = self.evaluate(&call.arguments[0], variables)?;
-        self.emitter.emit_puts(&value.printable());
-        Ok(())
-    }
-
-    fn finish(self) -> String {
-        self.emitter.finish()
-    }
+    Ok(AssemblyEmitter::new().finish(&output))
 }
 
 struct AssemblyEmitter {
@@ -328,6 +93,31 @@ impl AssemblyEmitter {
             cstrings: String::new(),
             next_string: 0,
         }
+    }
+
+    fn finish(mut self, output: &str) -> String {
+        for line in output.lines() {
+            self.emit_puts(line);
+        }
+
+        let mut assembly = String::new();
+        assembly.push_str(".build_version macos, 11, 0\n");
+        assembly.push_str(".section __TEXT,__cstring,cstring_literals\n");
+        assembly.push_str(&self.cstrings);
+        assembly.push('\n');
+        assembly.push_str(".section __TEXT,__text,regular,pure_instructions\n\n");
+        assembly.push_str(".globl _main\n");
+        assembly.push_str(".p2align 2\n");
+        assembly.push_str("_main:\n");
+        assembly.push_str("    stp x29, x30, [sp, #-16]!\n");
+        assembly.push_str("    mov x29, sp\n");
+        assembly.push_str(&self.text);
+        assembly.push_str("    mov w0, #0\n");
+        assembly.push_str("    ldp x29, x30, [sp], #16\n");
+        assembly.push_str("    ret\n\n");
+        assembly.push_str(".subsections_via_symbols\n");
+
+        assembly
     }
 
     fn emit_puts(&mut self, value: &str) {
@@ -347,101 +137,6 @@ impl AssemblyEmitter {
 
         label
     }
-
-    fn finish(self) -> String {
-        let mut output = String::new();
-        output.push_str(".build_version macos, 11, 0\n");
-        output.push_str(".section __TEXT,__cstring,cstring_literals\n");
-        output.push_str(&self.cstrings);
-        output.push('\n');
-        output.push_str(".section __TEXT,__text,regular,pure_instructions\n\n");
-        output.push_str(".globl _main\n");
-        output.push_str(".p2align 2\n");
-        output.push_str("_main:\n");
-        output.push_str("    stp x29, x30, [sp, #-16]!\n");
-        output.push_str("    mov x29, sp\n");
-        output.push_str(&self.text);
-        output.push_str("    mov w0, #0\n");
-        output.push_str("    ldp x29, x30, [sp], #16\n");
-        output.push_str("    ret\n\n");
-        output.push_str(".subsections_via_symbols\n");
-        output
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum Value {
-    Integer { value: u128, ty: Type },
-    Float { value: f64, ty: Type },
-    Bool(bool),
-}
-
-impl Value {
-    fn ty(&self) -> Type {
-        match self {
-            Self::Integer { ty, .. } | Self::Float { ty, .. } => *ty,
-            Self::Bool(_) => Type::Bool,
-        }
-    }
-
-    fn printable(&self) -> String {
-        match self {
-            Self::Integer { value, .. } => value.to_string(),
-            Self::Float { value, .. } => value.to_string(),
-            Self::Bool(value) => value.to_string(),
-        }
-    }
-}
-
-fn expect_type(value: Value, ty: Type) -> Result<Value, CompileError> {
-    if value.ty() == ty {
-        Ok(value)
-    } else {
-        Err(CompileError {
-            message: format!(
-                "cannot use `{}` value as `{}`",
-                value.ty().name(),
-                ty.name()
-            ),
-        })
-    }
-}
-
-fn integer_value(value: u128, ty: Type) -> Result<Value, CompileError> {
-    if !ty.is_integer() {
-        return Err(CompileError {
-            message: format!("cannot assign integer literal to `{}`", ty.name()),
-        });
-    }
-
-    let max = ty.max_integer_value().expect("integer type has max value");
-
-    if value > max {
-        return Err(CompileError {
-            message: format!("integer literal `{value}` does not fit in `{}`", ty.name()),
-        });
-    }
-
-    Ok(Value::Integer { value, ty })
-}
-
-fn float_value(value: &str, ty: Type) -> Result<Value, CompileError> {
-    if !ty.is_float() {
-        return Err(CompileError {
-            message: format!("cannot assign float literal to `{}`", ty.name()),
-        });
-    }
-
-    let value = match ty {
-        Type::F16 | Type::F32 => value.parse::<f32>().map(f64::from),
-        Type::F64 => value.parse::<f64>(),
-        _ => unreachable!("checked by is_float"),
-    }
-    .map_err(|_| CompileError {
-        message: format!("float literal `{value}` is invalid"),
-    })?;
-
-    Ok(Value::Float { value, ty })
 }
 
 fn escape_cstring(value: &str) -> String {
@@ -484,23 +179,6 @@ mod tests {
     }
 
     #[test]
-    fn emits_variable_and_println() {
-        let assembly = compile("fn main() { let a: i32 = 1 println(a) }");
-
-        assert!(assembly.contains(".asciz \"1\""));
-        assert!(assembly.contains("bl _puts"));
-    }
-
-    #[test]
-    fn emits_bool_and_float() {
-        let assembly =
-            compile("fn main() { let a: bool = true println(a) let b: f64 = 1.5 println(b) }");
-
-        assert!(assembly.contains(".asciz \"true\""));
-        assert!(assembly.contains(".asciz \"1.5\""));
-    }
-
-    #[test]
     fn emits_function_with_params_and_return() {
         let assembly = compile(
             "fn sample(a: i32, b: bool) -> i32 { return a } fn main() { println(sample(7, true)) }",
@@ -510,19 +188,21 @@ mod tests {
     }
 
     #[test]
-    fn emits_void_function_with_params() {
-        let assembly = compile("fn log(a: i32) { println(a) } fn main() { log(8) }");
+    fn emits_struct_field_access() {
+        let assembly = compile(
+            "struct Point { x: i32, y: bool } fn main() { let p: Point = Point { x: 7, y: true } println(p.x) }",
+        );
 
-        assert!(assembly.contains(".asciz \"8\""));
+        assert!(assembly.contains(".asciz \"7\""));
     }
 
     #[test]
-    fn emits_u128() {
+    fn emits_struct_value() {
         let assembly = compile(
-            "fn main() { let n: u128 = 340282366920938463463374607431768211455 println(n) }",
+            "struct Point { x: i32, y: bool } fn main() { let p: Point = Point { x: 7, y: true } println(p) }",
         );
 
-        assert!(assembly.contains(".asciz \"340282366920938463463374607431768211455\""));
+        assert!(assembly.contains(".asciz \"Point { x: 7, y: true }\""));
     }
 
     #[test]
@@ -533,24 +213,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_return() {
-        let error = compile_error("fn sample() -> i32 {} fn main() { sample() }");
+    fn rejects_unknown_struct() {
+        let error = compile_error("fn main() { let p: Point = Point { x: 1 } }");
 
-        assert!(error.message.contains("must return `i32`"));
+        assert!(error.message.contains("unknown type `Point`"));
     }
 
     #[test]
-    fn rejects_unknown_function() {
-        let error = compile_error("fn main() { nope() }");
+    fn rejects_missing_field() {
+        let error = compile_error(
+            "struct Point { x: i32, y: bool } fn main() { let p: Point = Point { x: 1 } }",
+        );
 
-        assert!(error.message.contains("unknown function `nope`"));
-    }
-
-    #[test]
-    fn rejects_integer_out_of_range() {
-        let error = compile_error("fn main() { let n: i8 = 128 }");
-
-        assert!(error.message.contains("does not fit in `i8`"));
+        assert!(error.message.contains("missing field `y`"));
     }
 
     fn compile(source: &str) -> String {

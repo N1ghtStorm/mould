@@ -1,6 +1,19 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
+    pub structs: Vec<StructDefinition>,
     pub functions: Vec<Function>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructDefinition {
+    pub name: String,
+    pub fields: Vec<StructField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructField {
+    pub name: String,
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,7 +60,7 @@ pub struct ReturnStatement {
     pub value: Expression,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     I8,
     U8,
@@ -65,6 +78,7 @@ pub enum Type {
     F32,
     F64,
     Bool,
+    Struct(String),
 }
 
 impl Type {
@@ -109,28 +123,29 @@ impl Type {
         }
     }
 
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> String {
         match self {
-            Self::I8 => "i8",
-            Self::U8 => "u8",
-            Self::I16 => "i16",
-            Self::U16 => "u16",
-            Self::I32 => "i32",
-            Self::U32 => "u32",
-            Self::I64 => "i64",
-            Self::U64 => "u64",
-            Self::I128 => "i128",
-            Self::U128 => "u128",
-            Self::Isize => "isize",
-            Self::Usize => "usize",
-            Self::F16 => "f16",
-            Self::F32 => "f32",
-            Self::F64 => "f64",
-            Self::Bool => "bool",
+            Self::I8 => "i8".to_string(),
+            Self::U8 => "u8".to_string(),
+            Self::I16 => "i16".to_string(),
+            Self::U16 => "u16".to_string(),
+            Self::I32 => "i32".to_string(),
+            Self::U32 => "u32".to_string(),
+            Self::I64 => "i64".to_string(),
+            Self::U64 => "u64".to_string(),
+            Self::I128 => "i128".to_string(),
+            Self::U128 => "u128".to_string(),
+            Self::Isize => "isize".to_string(),
+            Self::Usize => "usize".to_string(),
+            Self::F16 => "f16".to_string(),
+            Self::F32 => "f32".to_string(),
+            Self::F64 => "f64".to_string(),
+            Self::Bool => "bool".to_string(),
+            Self::Struct(name) => name.clone(),
         }
     }
 
-    pub fn is_integer(self) -> bool {
+    pub fn is_integer(&self) -> bool {
         matches!(
             self,
             Self::I8
@@ -148,15 +163,15 @@ impl Type {
         )
     }
 
-    pub fn is_float(self) -> bool {
+    pub fn is_float(&self) -> bool {
         matches!(self, Self::F16 | Self::F32 | Self::F64)
     }
 
-    pub fn is_bool(self) -> bool {
-        self == Self::Bool
+    pub fn is_bool(&self) -> bool {
+        *self == Self::Bool
     }
 
-    pub fn max_integer_value(self) -> Option<u128> {
+    pub fn max_integer_value(&self) -> Option<u128> {
         let bits = match self {
             Self::I8 => 7,
             Self::U8 => 8,
@@ -168,7 +183,7 @@ impl Type {
             Self::U64 | Self::Usize => 64,
             Self::I128 => 127,
             Self::U128 => 128,
-            Self::F16 | Self::F32 | Self::F64 | Self::Bool => return None,
+            Self::F16 | Self::F32 | Self::F64 | Self::Bool | Self::Struct(_) => return None,
         };
 
         if bits == 128 {
@@ -186,10 +201,30 @@ pub enum Expression {
     Bool(bool),
     Variable(String),
     Call(CallExpression),
+    StructLiteral(StructLiteral),
+    FieldAccess(Box<FieldAccess>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallExpression {
     pub name: String,
     pub arguments: Vec<Expression>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructLiteral {
+    pub name: String,
+    pub fields: Vec<StructLiteralField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructLiteralField {
+    pub name: String,
+    pub value: Expression,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldAccess {
+    pub object: Expression,
+    pub field: String,
 }

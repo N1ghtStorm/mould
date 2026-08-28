@@ -1,7 +1,8 @@
 use crate::{
     ast::{
-        Block, CallExpression, CallStatement, Expression, Function, FunctionParameter,
-        LetStatement, Program, ReturnStatement, Statement, Type,
+        Block, CallExpression, CallStatement, Expression, FieldAccess, Function, FunctionParameter,
+        LetStatement, Program, ReturnStatement, Statement, StructDefinition, StructField,
+        StructLiteral, StructLiteralField, Type,
     },
     lexer::{LexError, Span, Token, TokenKind, lex},
 };
@@ -40,13 +41,54 @@ impl Parser {
     }
 
     fn parse_program(&mut self) -> Result<Program, ParseError> {
+        let mut structs = Vec::new();
         let mut functions = Vec::new();
 
         while !self.at(&TokenKind::Eof) {
-            functions.push(self.parse_function()?);
+            self.eat(TokenKind::Pub);
+
+            match &self.current().kind {
+                TokenKind::Struct => structs.push(self.parse_struct_definition()?),
+                TokenKind::Fn => functions.push(self.parse_function()?),
+                _ => {
+                    return Err(ParseError {
+                        message: format!(
+                            "expected top-level item, found {}",
+                            describe_kind(&self.current().kind)
+                        ),
+                        span: self.current().span,
+                    });
+                }
+            }
         }
 
-        Ok(Program { functions })
+        Ok(Program { structs, functions })
+    }
+
+    fn parse_struct_definition(&mut self) -> Result<StructDefinition, ParseError> {
+        self.expect_simple(TokenKind::Struct, "`struct`")?;
+        let name = self.expect_identifier("struct name")?;
+        self.expect_simple(TokenKind::LeftBrace, "`{`")?;
+
+        let mut fields = Vec::new();
+
+        while !self.at(&TokenKind::RightBrace) {
+            self.eat(TokenKind::Pub);
+            let name = self.expect_identifier("field name")?;
+            self.expect_simple(TokenKind::Colon, "`:`")?;
+            let ty = self.parse_type()?;
+            fields.push(StructField { name, ty });
+
+            if self.at(&TokenKind::RightBrace) {
+                break;
+            }
+
+            self.expect_simple(TokenKind::Comma, "`,`")?;
+        }
+
+        self.expect_simple(TokenKind::RightBrace, "`}`")?;
+
+        Ok(StructDefinition { name, fields })
     }
 
     fn parse_function(&mut self) -> Result<Function, ParseError> {
@@ -83,7 +125,11 @@ impl Parser {
             let ty = self.parse_type()?;
             parameters.push(FunctionParameter { name, ty });
 
-            if !self.eat(TokenKind::Comma) {
+            if self.eat(TokenKind::Comma) {
+                if self.at(&TokenKind::RightParen) {
+                    break;
+                }
+            } else {
                 break;
             }
         }
@@ -159,7 +205,11 @@ impl Parser {
             loop {
                 arguments.push(self.parse_expression()?);
 
-                if !self.eat(TokenKind::Comma) {
+                if self.eat(TokenKind::Comma) {
+                    if self.at(&TokenKind::RightParen) {
+                        break;
+                    }
+                } else {
                     break;
                 }
             }
@@ -171,24 +221,39 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> Result<Type, ParseError> {
-        let token = self.current();
+        let token = self.current().clone();
 
         match token.kind {
             TokenKind::PrimitiveType(ty) => {
                 self.advance();
                 Ok(ty)
             }
+            TokenKind::Ident(name) => {
+                self.advance();
+                Ok(Type::Struct(name))
+            }
             _ => Err(ParseError {
-                message: format!(
-                    "expected primitive type, found {}",
-                    describe_kind(&token.kind)
-                ),
+                message: format!("expected type, found {}", describe_kind(&token.kind)),
                 span: token.span,
             }),
         }
     }
 
     fn parse_expression(&mut self) -> Result<Expression, ParseError> {
+        let mut expression = self.parse_primary_expression()?;
+
+        while self.eat(TokenKind::Dot) {
+            let field = self.expect_identifier("field name")?;
+            expression = Expression::FieldAccess(Box::new(FieldAccess {
+                object: expression,
+                field,
+            }));
+        }
+
+        Ok(expression)
+    }
+
+    fn parse_primary_expression(&mut self) -> Result<Expression, ParseError> {
         let token = self.current().clone();
 
         match token.kind {
@@ -216,6 +281,9 @@ impl Parser {
             TokenKind::Ident(_) if self.next_at(&TokenKind::LeftParen) => {
                 self.parse_call_expression().map(Expression::Call)
             }
+            TokenKind::Ident(_) if self.next_at(&TokenKind::LeftBrace) => {
+                self.parse_struct_literal().map(Expression::StructLiteral)
+            }
             TokenKind::Ident(name) => {
                 self.advance();
                 Ok(Expression::Variable(name))
@@ -225,6 +293,34 @@ impl Parser {
                 span: token.span,
             }),
         }
+    }
+
+    fn parse_struct_literal(&mut self) -> Result<StructLiteral, ParseError> {
+        let name = self.expect_identifier("struct name")?;
+        self.expect_simple(TokenKind::LeftBrace, "`{`")?;
+
+        let mut fields = Vec::new();
+
+        if !self.at(&TokenKind::RightBrace) {
+            loop {
+                let name = self.expect_identifier("field name")?;
+                self.expect_simple(TokenKind::Colon, "`:`")?;
+                let value = self.parse_expression()?;
+                fields.push(StructLiteralField { name, value });
+
+                if self.eat(TokenKind::Comma) {
+                    if self.at(&TokenKind::RightBrace) {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        self.expect_simple(TokenKind::RightBrace, "`}`")?;
+
+        Ok(StructLiteral { name, fields })
     }
 
     fn expect_identifier(&mut self, label: &str) -> Result<String, ParseError> {
@@ -291,7 +387,9 @@ fn describe_kind(kind: &TokenKind) -> String {
     match kind {
         TokenKind::Fn => "`fn`".to_string(),
         TokenKind::Let => "`let`".to_string(),
+        TokenKind::Pub => "`pub`".to_string(),
         TokenKind::Return => "`return`".to_string(),
+        TokenKind::Struct => "`struct`".to_string(),
         TokenKind::PrimitiveType(ty) => format!("type `{}`", ty.name()),
         TokenKind::BoolLiteral(value) => format!("bool literal `{value}`"),
         TokenKind::Ident(name) => format!("identifier `{name}`"),
@@ -303,6 +401,7 @@ fn describe_kind(kind: &TokenKind) -> String {
         TokenKind::RightBrace => "`}`".to_string(),
         TokenKind::Colon => "`:`".to_string(),
         TokenKind::Comma => "`,`".to_string(),
+        TokenKind::Dot => "`.`".to_string(),
         TokenKind::Arrow => "`->`".to_string(),
         TokenKind::Equal => "`=`".to_string(),
         TokenKind::Semicolon => "`;`".to_string(),
@@ -333,6 +432,43 @@ mod tests {
         assert_eq!(program.functions.len(), 1);
         assert_eq!(program.functions[0].name, "funcname");
         assert!(program.functions[0].body.statements.is_empty());
+    }
+
+    #[test]
+    fn parses_struct_definition() {
+        let program = parse_source(
+            r#"
+            pub struct Point {
+                pub x: i32,
+                y: bool,
+            }
+
+            fn main() {}
+            "#,
+        )
+        .unwrap();
+        let structure = &program.structs[0];
+
+        assert_eq!(structure.name, "Point");
+        assert_eq!(structure.fields.len(), 2);
+        assert_eq!(structure.fields[0].name, "x");
+        assert_eq!(structure.fields[0].ty, Type::I32);
+        assert_eq!(structure.fields[1].name, "y");
+        assert_eq!(structure.fields[1].ty, Type::Bool);
+    }
+
+    #[test]
+    fn parses_struct_type() {
+        let program =
+            parse_source("struct Point { x: i32 } fn sample(p: Point) -> Point { return p }")
+                .unwrap();
+        let function = &program.functions[0];
+
+        assert_eq!(function.parameters[0].ty, Type::Struct("Point".to_string()));
+        assert_eq!(
+            function.return_type,
+            Some(Type::Struct("Point".to_string()))
+        );
     }
 
     #[test]
@@ -410,7 +546,7 @@ mod tests {
 
     #[test]
     fn parses_all_primitive_types() {
-        let type_names = Type::ALL.map(Type::name).join(", ");
+        let type_names = Type::ALL.map(|ty| ty.name()).join(", ");
         let source = format!(
             "fn main() {{ {} }}",
             Type::ALL
@@ -499,10 +635,45 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_type_for_now() {
-        let error = parse_source("fn nope() { let value: str = 1 }").unwrap_err();
+    fn parses_struct_literal_and_field_access() {
+        let program = parse_source(
+            "struct Point { x: i32 } fn main() { let p: Point = Point { x: 7 } println(p.x) }",
+        )
+        .unwrap();
+        let let_statement = &program.functions[0].body.statements[0];
+        let print_statement = &program.functions[0].body.statements[1];
 
-        assert!(error.message.contains("expected primitive type"));
+        assert_eq!(
+            let_statement,
+            &Statement::Let(crate::LetStatement {
+                name: "p".to_string(),
+                ty: Type::Struct("Point".to_string()),
+                value: Expression::StructLiteral(crate::StructLiteral {
+                    name: "Point".to_string(),
+                    fields: vec![crate::StructLiteralField {
+                        name: "x".to_string(),
+                        value: Expression::Integer(7),
+                    }],
+                }),
+            })
+        );
+        assert_eq!(
+            print_statement,
+            &Statement::Call(crate::CallStatement {
+                name: "println".to_string(),
+                arguments: vec![Expression::FieldAccess(Box::new(crate::FieldAccess {
+                    object: Expression::Variable("p".to_string()),
+                    field: "x".to_string(),
+                }))],
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_missing_type() {
+        let error = parse_source("fn nope() { let value: = 1 }").unwrap_err();
+
+        assert!(error.message.contains("expected type"));
     }
 
     #[test]

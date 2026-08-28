@@ -1,0 +1,14 @@
+pub struct Point {
+    pub x: i32,
+    y: bool,
+}
+
+fn pick_x(point: Point) -> i32 {
+    return point.x
+}
+
+fn main() {
+    let point: Point = Point { x: 7, y: true }
+    println(pick_x(point))
+    println(point.y)
+}

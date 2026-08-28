@@ -16,7 +16,9 @@ pub struct Token {
 pub enum TokenKind {
     Fn,
     Let,
+    Pub,
     Return,
+    Struct,
     PrimitiveType(Type),
     BoolLiteral(bool),
     Ident(String),
@@ -28,6 +30,7 @@ pub enum TokenKind {
     RightBrace,
     Colon,
     Comma,
+    Dot,
     Arrow,
     Equal,
     Semicolon,
@@ -70,6 +73,7 @@ impl Lexer<'_> {
                 '}' => self.push_single(TokenKind::RightBrace),
                 ':' => self.push_single(TokenKind::Colon),
                 ',' => self.push_single(TokenKind::Comma),
+                '.' => self.push_single(TokenKind::Dot),
                 '-' if self.peek_next() == Some('>') => {
                     self.push_double(TokenKind::Arrow);
                 }
@@ -117,7 +121,9 @@ impl Lexer<'_> {
         let kind = match (text, Type::from_name(text)) {
             ("fn", _) => TokenKind::Fn,
             ("let", _) => TokenKind::Let,
+            ("pub", _) => TokenKind::Pub,
             ("return", _) => TokenKind::Return,
+            ("struct", _) => TokenKind::Struct,
             ("true", _) => TokenKind::BoolLiteral(true),
             ("false", _) => TokenKind::BoolLiteral(false),
             (_, Some(ty)) => TokenKind::PrimitiveType(ty),
