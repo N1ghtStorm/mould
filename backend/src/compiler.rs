@@ -235,6 +235,13 @@ mod tests {
     }
 
     #[test]
+    fn emits_loop_result() {
+        let assembly = compile("fn main() { loop { println(1) break } }");
+
+        assert!(assembly.contains(".asciz \"1\""));
+    }
+
+    #[test]
     fn rejects_use_after_dealloc() {
         let error = compile_error("fn main() { let p: &i32 = alloc(7) dealloc(p) println(*p) }");
 

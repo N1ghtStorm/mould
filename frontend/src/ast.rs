@@ -41,6 +41,10 @@ pub enum Statement {
     Call(CallStatement),
     Return(ReturnStatement),
     If(IfStatement),
+    Loop(LoopStatement),
+    While(WhileStatement),
+    Break,
+    Continue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +70,17 @@ pub struct IfStatement {
     pub condition: Expression,
     pub then_block: Block,
     pub else_block: Option<Block>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopStatement {
+    pub body: Block,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhileStatement {
+    pub condition: Expression,
+    pub body: Block,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

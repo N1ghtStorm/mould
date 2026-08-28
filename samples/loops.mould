@@ -1,0 +1,16 @@
+fn main() {
+    loop {
+        println(1)
+        break
+        println(2)
+    }
+
+    while false {
+        println(3)
+    }
+
+    while true {
+        println(4)
+        break
+    }
+}

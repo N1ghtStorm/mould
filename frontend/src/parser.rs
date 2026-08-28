@@ -1,9 +1,9 @@
 use crate::{
     ast::{
         BinaryExpression, BinaryOperator, Block, CallExpression, CallStatement, Expression,
-        FieldAccess, Function, FunctionParameter, IfStatement, LetStatement, Program,
-        ReturnStatement, Statement, StructDefinition, StructField, StructLiteral,
-        StructLiteralField, Type,
+        FieldAccess, Function, FunctionParameter, IfStatement, LetStatement, LoopStatement,
+        Program, ReturnStatement, Statement, StructDefinition, StructField, StructLiteral,
+        StructLiteralField, Type, WhileStatement,
     },
     lexer::{LexError, Span, Token, TokenKind, lex},
 };
@@ -159,6 +159,18 @@ impl Parser {
             TokenKind::Ident(_) => self.parse_call_statement().map(Statement::Call),
             TokenKind::Return => self.parse_return_statement().map(Statement::Return),
             TokenKind::If => self.parse_if_statement().map(Statement::If),
+            TokenKind::Loop => self.parse_loop_statement().map(Statement::Loop),
+            TokenKind::While => self.parse_while_statement().map(Statement::While),
+            TokenKind::Break => {
+                self.advance();
+                self.eat(TokenKind::Semicolon);
+                Ok(Statement::Break)
+            }
+            TokenKind::Continue => {
+                self.advance();
+                self.eat(TokenKind::Semicolon);
+                Ok(Statement::Continue)
+            }
             _ => Err(ParseError {
                 message: format!(
                     "expected statement, found {}",
@@ -224,6 +236,21 @@ impl Parser {
             then_block,
             else_block,
         })
+    }
+
+    fn parse_loop_statement(&mut self) -> Result<LoopStatement, ParseError> {
+        self.expect_simple(TokenKind::Loop, "`loop`")?;
+        let body = self.parse_block()?;
+
+        Ok(LoopStatement { body })
+    }
+
+    fn parse_while_statement(&mut self) -> Result<WhileStatement, ParseError> {
+        self.expect_simple(TokenKind::While, "`while`")?;
+        let condition = self.parse_if_condition()?;
+        let body = self.parse_block()?;
+
+        Ok(WhileStatement { condition, body })
     }
 
     fn parse_if_condition(&mut self) -> Result<Expression, ParseError> {
@@ -628,6 +655,10 @@ fn describe_kind(kind: &TokenKind) -> String {
         TokenKind::If => "`if`".to_string(),
         TokenKind::Else => "`else`".to_string(),
         TokenKind::Let => "`let`".to_string(),
+        TokenKind::Loop => "`loop`".to_string(),
+        TokenKind::While => "`while`".to_string(),
+        TokenKind::Break => "`break`".to_string(),
+        TokenKind::Continue => "`continue`".to_string(),
         TokenKind::Pub => "`pub`".to_string(),
         TokenKind::Return => "`return`".to_string(),
         TokenKind::Struct => "`struct`".to_string(),
@@ -1122,6 +1153,47 @@ mod tests {
                         })),
                     })),
                 })),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_loop_statement() {
+        let program = parse_source("fn main() { loop { println(1) break } }").unwrap();
+        let statement = &program.functions[0].body.statements[0];
+
+        assert_eq!(
+            statement,
+            &Statement::Loop(crate::LoopStatement {
+                body: crate::Block {
+                    statements: vec![
+                        Statement::Call(crate::CallStatement {
+                            name: "println".to_string(),
+                            arguments: vec![Expression::Integer(1)],
+                        }),
+                        Statement::Break,
+                    ],
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn parses_while_statement() {
+        let program = parse_source("fn main() { while true && !false { continue } }").unwrap();
+        let statement = &program.functions[0].body.statements[0];
+
+        assert_eq!(
+            statement,
+            &Statement::While(crate::WhileStatement {
+                condition: Expression::Binary(Box::new(BinaryExpression {
+                    left: Expression::Bool(true),
+                    operator: BinaryOperator::BoolAnd,
+                    right: Expression::BitNot(Box::new(Expression::Bool(false))),
+                })),
+                body: crate::Block {
+                    statements: vec![Statement::Continue],
+                },
             })
         );
     }

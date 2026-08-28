@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use crate::{
-    BinaryExpression, BinaryOperator, CallExpression, Expression, FieldAccess, Function, Program,
-    Statement::{self, Call, If, Let, Return},
+    BinaryExpression, BinaryOperator, Block, CallExpression, Expression, FieldAccess, Function,
+    Program,
+    Statement::{self, Break, Call, Continue, If, Let, Loop, Return, While},
     StructDefinition, StructLiteral, Type,
 };
 
@@ -45,6 +46,14 @@ enum IntegerValue {
 enum PointerValue {
     Reference(Box<Value>),
     Heap { allocation: usize, ty: Type },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ExecutionSignal {
+    None,
+    Return(Value),
+    Break,
+    Continue,
 }
 
 impl Value {
@@ -238,22 +247,32 @@ impl<'program> Runtime<'program> {
         function: &Function,
         variables: &mut HashMap<String, Value>,
     ) -> Result<Option<Value>, RuntimeError> {
-        self.run_block(&function.body, function.return_type.clone(), variables)
+        match self.run_block(&function.body, function.return_type.clone(), variables)? {
+            ExecutionSignal::None => Ok(None),
+            ExecutionSignal::Return(value) => Ok(Some(value)),
+            ExecutionSignal::Break => Err(RuntimeError {
+                message: "cannot `break` outside loop".to_string(),
+            }),
+            ExecutionSignal::Continue => Err(RuntimeError {
+                message: "cannot `continue` outside loop".to_string(),
+            }),
+        }
     }
 
     fn run_block(
         &mut self,
-        block: &crate::Block,
+        block: &Block,
         return_type: Option<Type>,
         variables: &mut HashMap<String, Value>,
-    ) -> Result<Option<Value>, RuntimeError> {
+    ) -> Result<ExecutionSignal, RuntimeError> {
         for statement in &block.statements {
-            if let Some(value) = self.run_statement(statement, return_type.clone(), variables)? {
-                return Ok(Some(value));
+            let signal = self.run_statement(statement, return_type.clone(), variables)?;
+            if signal != ExecutionSignal::None {
+                return Ok(signal);
             }
         }
 
-        Ok(None)
+        Ok(ExecutionSignal::None)
     }
 
     fn run_statement(
@@ -261,12 +280,12 @@ impl<'program> Runtime<'program> {
         statement: &Statement,
         return_type: Option<Type>,
         variables: &mut HashMap<String, Value>,
-    ) -> Result<Option<Value>, RuntimeError> {
+    ) -> Result<ExecutionSignal, RuntimeError> {
         match statement {
             Let(statement) => {
                 let value = self.evaluate_as(&statement.value, statement.ty.clone(), variables)?;
                 variables.insert(statement.name.clone(), value);
-                Ok(None)
+                Ok(ExecutionSignal::None)
             }
             Call(statement) => {
                 let call = CallExpression {
@@ -274,7 +293,7 @@ impl<'program> Runtime<'program> {
                     arguments: statement.arguments.clone(),
                 };
                 self.evaluate_call_statement(&call, variables)?;
-                Ok(None)
+                Ok(ExecutionSignal::None)
             }
             Return(statement) => {
                 let Some(ty) = return_type else {
@@ -284,7 +303,8 @@ impl<'program> Runtime<'program> {
                     });
                 };
 
-                self.evaluate_as(&statement.value, ty, variables).map(Some)
+                self.evaluate_as(&statement.value, ty, variables)
+                    .map(ExecutionSignal::Return)
             }
             If(statement) => {
                 let condition = self.evaluate_as(&statement.condition, Type::Bool, variables)?;
@@ -303,8 +323,35 @@ impl<'program> Runtime<'program> {
                     return self.run_block(block, return_type, &mut block_variables);
                 }
 
-                Ok(None)
+                Ok(ExecutionSignal::None)
             }
+            Loop(statement) => loop {
+                let mut block_variables = variables.clone();
+                match self.run_block(&statement.body, return_type.clone(), &mut block_variables)? {
+                    ExecutionSignal::None | ExecutionSignal::Continue => {}
+                    ExecutionSignal::Break => return Ok(ExecutionSignal::None),
+                    signal @ ExecutionSignal::Return(_) => return Ok(signal),
+                }
+            },
+            While(statement) => loop {
+                let condition = self.evaluate_as(&statement.condition, Type::Bool, variables)?;
+                let Value::Bool(condition) = condition else {
+                    unreachable!("bool type is stored as bool value");
+                };
+
+                if !condition {
+                    return Ok(ExecutionSignal::None);
+                }
+
+                let mut block_variables = variables.clone();
+                match self.run_block(&statement.body, return_type.clone(), &mut block_variables)? {
+                    ExecutionSignal::None | ExecutionSignal::Continue => {}
+                    ExecutionSignal::Break => return Ok(ExecutionSignal::None),
+                    signal @ ExecutionSignal::Return(_) => return Ok(signal),
+                }
+            },
+            Break => Ok(ExecutionSignal::Break),
+            Continue => Ok(ExecutionSignal::Continue),
         }
     }
 
@@ -821,7 +868,21 @@ fn validate_statement_types(
 
             Ok(())
         }
-        Call(_) | Return(_) => Ok(()),
+        Loop(statement) => {
+            for statement in &statement.body.statements {
+                validate_statement_types(statement, structs)?;
+            }
+
+            Ok(())
+        }
+        While(statement) => {
+            for statement in &statement.body.statements {
+                validate_statement_types(statement, structs)?;
+            }
+
+            Ok(())
+        }
+        Call(_) | Return(_) | Break | Continue => Ok(()),
     }
 }
 
@@ -1613,6 +1674,67 @@ mod tests {
         let error = run_main(&program).unwrap_err();
 
         assert!(error.message.contains("cannot use `u32` value as `i32`"));
+    }
+
+    #[test]
+    fn runs_loop_until_break() {
+        let program =
+            parse_source("fn main() { loop { println(1) break println(2) } println(3) }").unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "1\n3\n");
+    }
+
+    #[test]
+    fn runs_while_until_break() {
+        let program =
+            parse_source("fn main() { while true { println(1) break println(2) } println(3) }")
+                .unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "1\n3\n");
+    }
+
+    #[test]
+    fn skips_false_while_body() {
+        let program = parse_source("fn main() { while false { println(1) } println(2) }").unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "2\n");
+    }
+
+    #[test]
+    fn returns_from_loop() {
+        let program =
+            parse_source("fn pick() -> i32 { loop { return 7 } } fn main() { println(pick()) }")
+                .unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "7\n");
+    }
+
+    #[test]
+    fn rejects_break_outside_loop() {
+        let program = parse_source("fn main() { break }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(error.message.contains("cannot `break` outside loop"));
+    }
+
+    #[test]
+    fn rejects_continue_outside_loop() {
+        let program = parse_source("fn main() { continue }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(error.message.contains("cannot `continue` outside loop"));
+    }
+
+    #[test]
+    fn rejects_non_bool_while_condition() {
+        let program = parse_source("fn main() { while 1 { break } }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(
+            error
+                .message
+                .contains("cannot assign integer literal to `bool`")
+        );
     }
 
     #[test]
