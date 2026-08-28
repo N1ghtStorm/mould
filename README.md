@@ -1,0 +1,1 @@
+mould lang is a low level language with Rust syntax
