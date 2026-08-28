@@ -28,9 +28,11 @@ pub enum TokenKind {
     RightParen,
     LeftBrace,
     RightBrace,
+    Ampersand,
     Colon,
     Comma,
     Dot,
+    Star,
     Arrow,
     Equal,
     Semicolon,
@@ -71,9 +73,11 @@ impl Lexer<'_> {
                 ')' => self.push_single(TokenKind::RightParen),
                 '{' => self.push_single(TokenKind::LeftBrace),
                 '}' => self.push_single(TokenKind::RightBrace),
+                '&' => self.push_single(TokenKind::Ampersand),
                 ':' => self.push_single(TokenKind::Colon),
                 ',' => self.push_single(TokenKind::Comma),
                 '.' => self.push_single(TokenKind::Dot),
+                '*' => self.push_single(TokenKind::Star),
                 '-' if self.peek_next() == Some('>') => {
                     self.push_double(TokenKind::Arrow);
                 }

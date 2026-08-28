@@ -224,6 +224,11 @@ impl Parser {
         let token = self.current().clone();
 
         match token.kind {
+            TokenKind::Ampersand => {
+                self.advance();
+                let ty = self.parse_type()?;
+                Ok(Type::Pointer(Box::new(ty)))
+            }
             TokenKind::PrimitiveType(ty) => {
                 self.advance();
                 Ok(ty)
@@ -240,6 +245,18 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Result<Expression, ParseError> {
+        if self.eat(TokenKind::Ampersand) {
+            return self
+                .parse_expression()
+                .map(|expression| Expression::AddressOf(Box::new(expression)));
+        }
+
+        if self.eat(TokenKind::Star) {
+            return self
+                .parse_expression()
+                .map(|expression| Expression::Dereference(Box::new(expression)));
+        }
+
         let mut expression = self.parse_primary_expression()?;
 
         while self.eat(TokenKind::Dot) {
@@ -399,9 +416,11 @@ fn describe_kind(kind: &TokenKind) -> String {
         TokenKind::RightParen => "`)`".to_string(),
         TokenKind::LeftBrace => "`{`".to_string(),
         TokenKind::RightBrace => "`}`".to_string(),
+        TokenKind::Ampersand => "`&`".to_string(),
         TokenKind::Colon => "`:`".to_string(),
         TokenKind::Comma => "`,`".to_string(),
         TokenKind::Dot => "`.`".to_string(),
+        TokenKind::Star => "`*`".to_string(),
         TokenKind::Arrow => "`->`".to_string(),
         TokenKind::Equal => "`=`".to_string(),
         TokenKind::Semicolon => "`;`".to_string(),
@@ -666,6 +685,45 @@ mod tests {
                     field: "x".to_string(),
                 }))],
             })
+        );
+    }
+
+    #[test]
+    fn parses_pointer_type_address_of_and_dereference() {
+        let program =
+            parse_source("fn main() { let a: i32 = 7 let p: &i32 = &a println(*p) }").unwrap();
+        let pointer_statement = &program.functions[0].body.statements[1];
+        let print_statement = &program.functions[0].body.statements[2];
+
+        assert_eq!(
+            pointer_statement,
+            &Statement::Let(crate::LetStatement {
+                name: "p".to_string(),
+                ty: Type::Pointer(Box::new(Type::I32)),
+                value: Expression::AddressOf(Box::new(Expression::Variable("a".to_string()))),
+            })
+        );
+        assert_eq!(
+            print_statement,
+            &Statement::Call(crate::CallStatement {
+                name: "println".to_string(),
+                arguments: vec![Expression::Dereference(Box::new(Expression::Variable(
+                    "p".to_string()
+                )))],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_struct_pointer_type() {
+        let program =
+            parse_source("struct Point { x: i32 } fn pick_x(p: &Point) -> i32 { return p.x }")
+                .unwrap();
+        let function = &program.functions[0];
+
+        assert_eq!(
+            function.parameters[0].ty,
+            Type::Pointer(Box::new(Type::Struct("Point".to_string())))
         );
     }
 

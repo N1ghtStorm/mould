@@ -79,6 +79,7 @@ pub enum Type {
     F64,
     Bool,
     Struct(String),
+    Pointer(Box<Type>),
 }
 
 impl Type {
@@ -142,6 +143,7 @@ impl Type {
             Self::F64 => "f64".to_string(),
             Self::Bool => "bool".to_string(),
             Self::Struct(name) => name.clone(),
+            Self::Pointer(ty) => format!("&{}", ty.name()),
         }
     }
 
@@ -183,7 +185,9 @@ impl Type {
             Self::U64 | Self::Usize => 64,
             Self::I128 => 127,
             Self::U128 => 128,
-            Self::F16 | Self::F32 | Self::F64 | Self::Bool | Self::Struct(_) => return None,
+            Self::F16 | Self::F32 | Self::F64 | Self::Bool | Self::Struct(_) | Self::Pointer(_) => {
+                return None;
+            }
         };
 
         if bits == 128 {
@@ -203,6 +207,8 @@ pub enum Expression {
     Call(CallExpression),
     StructLiteral(StructLiteral),
     FieldAccess(Box<FieldAccess>),
+    AddressOf(Box<Expression>),
+    Dereference(Box<Expression>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

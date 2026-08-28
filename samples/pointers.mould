@@ -1,0 +1,22 @@
+struct Point {
+    x: i32,
+    y: bool,
+}
+
+fn show(value: &i32) {
+    println(*value)
+}
+
+fn pick_x(point: &Point) -> i32 {
+    return point.x
+}
+
+fn main() {
+    let a: i32 = 7
+    let pointer: &i32 = &a
+    println(*pointer)
+    show(&a)
+
+    let point: Point = Point { x: 9, y: true }
+    println(pick_x(&point))
+}

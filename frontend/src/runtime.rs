@@ -32,6 +32,7 @@ enum Value {
         name: String,
         fields: Vec<(String, Value)>,
     },
+    Pointer(Box<Value>),
 }
 
 impl Value {
@@ -40,6 +41,7 @@ impl Value {
             Self::Integer { ty, .. } | Self::Float { ty, .. } => ty.clone(),
             Self::Bool(_) => Type::Bool,
             Self::Struct { name, .. } => Type::Struct(name.clone()),
+            Self::Pointer(value) => Type::Pointer(Box::new(value.ty())),
         }
     }
 
@@ -56,6 +58,7 @@ impl Value {
                     .join(", ");
                 format!("{name} {{ {fields} }}")
             }
+            Self::Pointer(value) => format!("&{}", value.printable()),
         }
     }
 }
@@ -249,6 +252,11 @@ impl<'program> Runtime<'program> {
             Expression::Call(call) => self.evaluate_call_expression(call, variables),
             Expression::StructLiteral(literal) => self.evaluate_struct_literal(literal, variables),
             Expression::FieldAccess(access) => self.evaluate_field_access(access, variables),
+            Expression::AddressOf(expression) => {
+                let value = self.evaluate(expression, variables)?;
+                Ok(Value::Pointer(Box::new(value)))
+            }
+            Expression::Dereference(expression) => self.evaluate_dereference(expression, variables),
         }
     }
 
@@ -286,6 +294,14 @@ impl<'program> Runtime<'program> {
             }
             Expression::FieldAccess(access) => {
                 let value = self.evaluate_field_access(access, variables)?;
+                expect_type(value, ty)
+            }
+            Expression::AddressOf(expression) => {
+                let value = self.evaluate(expression, variables)?;
+                expect_type(Value::Pointer(Box::new(value)), ty)
+            }
+            Expression::Dereference(expression) => {
+                let value = self.evaluate_dereference(expression, variables)?;
                 expect_type(value, ty)
             }
         }
@@ -408,12 +424,43 @@ impl<'program> Runtime<'program> {
                 .ok_or_else(|| RuntimeError {
                     message: format!("unknown field `{}` in `{name}`", access.field),
                 }),
+            Value::Pointer(value) => match *value {
+                Value::Struct { name, fields } => fields
+                    .into_iter()
+                    .find(|(field, _)| field == &access.field)
+                    .map(|(_, value)| value)
+                    .ok_or_else(|| RuntimeError {
+                        message: format!("unknown field `{}` in `{name}`", access.field),
+                    }),
+                value => Err(RuntimeError {
+                    message: format!(
+                        "cannot access field `{}` on `{}`",
+                        access.field,
+                        value.ty().name()
+                    ),
+                }),
+            },
             value => Err(RuntimeError {
                 message: format!(
                     "cannot access field `{}` on `{}`",
                     access.field,
                     value.ty().name()
                 ),
+            }),
+        }
+    }
+
+    fn evaluate_dereference(
+        &mut self,
+        expression: &Expression,
+        variables: &HashMap<String, Value>,
+    ) -> Result<Value, RuntimeError> {
+        let value = self.evaluate(expression, variables)?;
+
+        match value {
+            Value::Pointer(value) => Ok(*value),
+            value => Err(RuntimeError {
+                message: format!("cannot dereference `{}`", value.ty().name()),
             }),
         }
     }
@@ -437,6 +484,7 @@ fn validate_type(
         Type::Struct(name) if !structs.contains_key(name) => Err(RuntimeError {
             message: format!("unknown type `{name}`"),
         }),
+        Type::Pointer(ty) => validate_type(ty, structs),
         _ => Ok(()),
     }
 }
@@ -554,6 +602,41 @@ mod tests {
         .unwrap();
 
         assert_eq!(run_main(&program).unwrap(), "9\n");
+    }
+
+    #[test]
+    fn dereferences_pointer() {
+        let program =
+            parse_source("fn main() { let a: i32 = 7 let p: &i32 = &a println(*p) }").unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "7\n");
+    }
+
+    #[test]
+    fn passes_pointer_to_function() {
+        let program =
+            parse_source("fn show(p: &i32) { println(*p) } fn main() { let a: i32 = 8 show(&a) }")
+                .unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "8\n");
+    }
+
+    #[test]
+    fn reads_field_through_struct_pointer() {
+        let program = parse_source(
+            "struct Point { x: i32 } fn pick_x(p: &Point) -> i32 { return p.x } fn main() { let p: Point = Point { x: 9 } println(pick_x(&p)) }",
+        )
+        .unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "9\n");
+    }
+
+    #[test]
+    fn rejects_dereferencing_non_pointer() {
+        let program = parse_source("fn main() { let a: i32 = 7 println(*a) }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(error.message.contains("cannot dereference `i32`"));
     }
 
     #[test]
