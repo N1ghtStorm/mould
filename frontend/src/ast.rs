@@ -6,7 +6,15 @@ pub struct Program {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     pub name: String,
+    pub parameters: Vec<FunctionParameter>,
+    pub return_type: Option<Type>,
     pub body: Block,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionParameter {
+    pub name: String,
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +26,7 @@ pub struct Block {
 pub enum Statement {
     Let(LetStatement),
     Call(CallStatement),
+    Return(ReturnStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +40,11 @@ pub struct LetStatement {
 pub struct CallStatement {
     pub name: String,
     pub arguments: Vec<Expression>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReturnStatement {
+    pub value: Expression,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,4 +185,11 @@ pub enum Expression {
     Float(String),
     Bool(bool),
     Variable(String),
+    Call(CallExpression),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallExpression {
+    pub name: String,
+    pub arguments: Vec<Expression>,
 }

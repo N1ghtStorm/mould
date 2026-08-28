@@ -16,6 +16,7 @@ pub struct Token {
 pub enum TokenKind {
     Fn,
     Let,
+    Return,
     PrimitiveType(Type),
     BoolLiteral(bool),
     Ident(String),
@@ -27,6 +28,7 @@ pub enum TokenKind {
     RightBrace,
     Colon,
     Comma,
+    Arrow,
     Equal,
     Semicolon,
     Eof,
@@ -68,6 +70,9 @@ impl Lexer<'_> {
                 '}' => self.push_single(TokenKind::RightBrace),
                 ':' => self.push_single(TokenKind::Colon),
                 ',' => self.push_single(TokenKind::Comma),
+                '-' if self.peek_next() == Some('>') => {
+                    self.push_double(TokenKind::Arrow);
+                }
                 '=' => self.push_single(TokenKind::Equal),
                 ';' => self.push_single(TokenKind::Semicolon),
                 ch if is_ident_start(ch) => self.lex_identifier(),
@@ -112,6 +117,7 @@ impl Lexer<'_> {
         let kind = match (text, Type::from_name(text)) {
             ("fn", _) => TokenKind::Fn,
             ("let", _) => TokenKind::Let,
+            ("return", _) => TokenKind::Return,
             ("true", _) => TokenKind::BoolLiteral(true),
             ("false", _) => TokenKind::BoolLiteral(false),
             (_, Some(ty)) => TokenKind::PrimitiveType(ty),
@@ -169,6 +175,19 @@ impl Lexer<'_> {
 
     fn push_single(&mut self, kind: TokenKind) {
         let start = self.position;
+        self.bump();
+        self.tokens.push(Token {
+            kind,
+            span: Span {
+                start,
+                end: self.position,
+            },
+        });
+    }
+
+    fn push_double(&mut self, kind: TokenKind) {
+        let start = self.position;
+        self.bump();
         self.bump();
         self.tokens.push(Token {
             kind,

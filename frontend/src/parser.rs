@@ -1,5 +1,8 @@
 use crate::{
-    ast::{Block, CallStatement, Expression, Function, LetStatement, Program, Statement, Type},
+    ast::{
+        Block, CallExpression, CallStatement, Expression, Function, FunctionParameter,
+        LetStatement, Program, ReturnStatement, Statement, Type,
+    },
     lexer::{LexError, Span, Token, TokenKind, lex},
 };
 
@@ -50,10 +53,42 @@ impl Parser {
         self.expect_simple(TokenKind::Fn, "`fn`")?;
         let name = self.expect_identifier("function name")?;
         self.expect_simple(TokenKind::LeftParen, "`(`")?;
+        let parameters = self.parse_parameters()?;
         self.expect_simple(TokenKind::RightParen, "`)`")?;
+        let return_type = if self.eat(TokenKind::Arrow) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
         let body = self.parse_block()?;
 
-        Ok(Function { name, body })
+        Ok(Function {
+            name,
+            parameters,
+            return_type,
+            body,
+        })
+    }
+
+    fn parse_parameters(&mut self) -> Result<Vec<FunctionParameter>, ParseError> {
+        let mut parameters = Vec::new();
+
+        if self.at(&TokenKind::RightParen) {
+            return Ok(parameters);
+        }
+
+        loop {
+            let name = self.expect_identifier("parameter name")?;
+            self.expect_simple(TokenKind::Colon, "`:`")?;
+            let ty = self.parse_type()?;
+            parameters.push(FunctionParameter { name, ty });
+
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+
+        Ok(parameters)
     }
 
     fn parse_block(&mut self) -> Result<Block, ParseError> {
@@ -73,6 +108,7 @@ impl Parser {
         match &self.current().kind {
             TokenKind::Let => self.parse_let_statement().map(Statement::Let),
             TokenKind::Ident(_) => self.parse_call_statement().map(Statement::Call),
+            TokenKind::Return => self.parse_return_statement().map(Statement::Return),
             _ => Err(ParseError {
                 message: format!(
                     "expected statement, found {}",
@@ -96,6 +132,24 @@ impl Parser {
     }
 
     fn parse_call_statement(&mut self) -> Result<CallStatement, ParseError> {
+        let call = self.parse_call_expression()?;
+        self.eat(TokenKind::Semicolon);
+
+        Ok(CallStatement {
+            name: call.name,
+            arguments: call.arguments,
+        })
+    }
+
+    fn parse_return_statement(&mut self) -> Result<ReturnStatement, ParseError> {
+        self.expect_simple(TokenKind::Return, "`return`")?;
+        let value = self.parse_expression()?;
+        self.eat(TokenKind::Semicolon);
+
+        Ok(ReturnStatement { value })
+    }
+
+    fn parse_call_expression(&mut self) -> Result<CallExpression, ParseError> {
         let name = self.expect_identifier("function name")?;
         self.expect_simple(TokenKind::LeftParen, "`(`")?;
 
@@ -112,9 +166,8 @@ impl Parser {
         }
 
         self.expect_simple(TokenKind::RightParen, "`)`")?;
-        self.eat(TokenKind::Semicolon);
 
-        Ok(CallStatement { name, arguments })
+        Ok(CallExpression { name, arguments })
     }
 
     fn parse_type(&mut self) -> Result<Type, ParseError> {
@@ -136,9 +189,9 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Result<Expression, ParseError> {
-        let token = self.current();
+        let token = self.current().clone();
 
-        match &token.kind {
+        match token.kind {
             TokenKind::Integer(value) => {
                 let parsed = value.parse::<u128>().map_err(|_| ParseError {
                     message: format!("integer literal `{value}` does not fit in u128"),
@@ -157,12 +210,13 @@ impl Parser {
                 Ok(Expression::Float(value))
             }
             TokenKind::BoolLiteral(value) => {
-                let value = *value;
                 self.advance();
                 Ok(Expression::Bool(value))
             }
+            TokenKind::Ident(_) if self.next_at(&TokenKind::LeftParen) => {
+                self.parse_call_expression().map(Expression::Call)
+            }
             TokenKind::Ident(name) => {
-                let name = name.clone();
                 self.advance();
                 Ok(Expression::Variable(name))
             }
@@ -225,12 +279,19 @@ impl Parser {
 
         false
     }
+
+    fn next_at(&self, kind: &TokenKind) -> bool {
+        self.tokens
+            .get(self.position + 1)
+            .is_some_and(|token| token.kind == *kind)
+    }
 }
 
 fn describe_kind(kind: &TokenKind) -> String {
     match kind {
         TokenKind::Fn => "`fn`".to_string(),
         TokenKind::Let => "`let`".to_string(),
+        TokenKind::Return => "`return`".to_string(),
         TokenKind::PrimitiveType(ty) => format!("type `{}`", ty.name()),
         TokenKind::BoolLiteral(value) => format!("bool literal `{value}`"),
         TokenKind::Ident(name) => format!("identifier `{name}`"),
@@ -242,6 +303,7 @@ fn describe_kind(kind: &TokenKind) -> String {
         TokenKind::RightBrace => "`}`".to_string(),
         TokenKind::Colon => "`:`".to_string(),
         TokenKind::Comma => "`,`".to_string(),
+        TokenKind::Arrow => "`->`".to_string(),
         TokenKind::Equal => "`=`".to_string(),
         TokenKind::Semicolon => "`;`".to_string(),
         TokenKind::Eof => "end of file".to_string(),
@@ -287,10 +349,48 @@ mod tests {
     }
 
     #[test]
-    fn rejects_function_parameters_for_now() {
-        let error = parse_source("fn nope(value) {}").unwrap_err();
+    fn parses_function_parameters_and_return_type() {
+        let program = parse_source("fn sample(a: i32, b: bool) -> i32 { return a }").unwrap();
+        let function = &program.functions[0];
 
-        assert!(error.message.contains("expected `)`"));
+        assert_eq!(function.name, "sample");
+        assert_eq!(function.return_type, Some(Type::I32));
+        assert_eq!(function.parameters.len(), 2);
+        assert_eq!(function.parameters[0].name, "a");
+        assert_eq!(function.parameters[0].ty, Type::I32);
+        assert_eq!(function.parameters[1].name, "b");
+        assert_eq!(function.parameters[1].ty, Type::Bool);
+    }
+
+    #[test]
+    fn parses_call_expression() {
+        let program = parse_source("fn main() { let a: i32 = sample(1, true) }").unwrap();
+        let statement = &program.functions[0].body.statements[0];
+
+        assert_eq!(
+            statement,
+            &Statement::Let(crate::LetStatement {
+                name: "a".to_string(),
+                ty: Type::I32,
+                value: Expression::Call(crate::CallExpression {
+                    name: "sample".to_string(),
+                    arguments: vec![Expression::Integer(1), Expression::Bool(true)],
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_return_statement() {
+        let program = parse_source("fn sample() -> i32 { return 1 }").unwrap();
+        let statement = &program.functions[0].body.statements[0];
+
+        assert_eq!(
+            statement,
+            &Statement::Return(crate::ReturnStatement {
+                value: Expression::Integer(1),
+            })
+        );
     }
 
     #[test]

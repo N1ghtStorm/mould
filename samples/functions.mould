@@ -1,0 +1,12 @@
+fn sample(a: i32, b: bool) -> i32 {
+    return a
+}
+
+fn log(value: i32) {
+    println(value)
+}
+
+fn main() {
+    let value: i32 = sample(7, true)
+    log(value)
+}

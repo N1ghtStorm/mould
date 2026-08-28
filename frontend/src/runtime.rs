@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::{
-    Expression, Function, Program,
-    Statement::{self, Call, Let},
+    CallExpression, Expression, Function, Program,
+    Statement::{self, Call, Let, Return},
     Type,
 };
 
@@ -12,15 +12,9 @@ pub struct RuntimeError {
 }
 
 pub fn run_main(program: &Program) -> Result<String, RuntimeError> {
-    let main = program
-        .functions
-        .iter()
-        .find(|function| function.name == "main")
-        .ok_or_else(|| RuntimeError {
-            message: "function `main` not found".to_string(),
-        })?;
-
-    Runtime::new().run_function(main)
+    let mut runtime = Runtime::new(program)?;
+    runtime.call_main()?;
+    Ok(runtime.output)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,75 +41,147 @@ impl Value {
     }
 }
 
-struct Runtime {
-    variables: HashMap<String, Value>,
+struct Runtime<'program> {
+    functions: HashMap<String, &'program Function>,
     output: String,
 }
 
-impl Runtime {
-    fn new() -> Self {
-        Self {
-            variables: HashMap::new(),
+impl<'program> Runtime<'program> {
+    fn new(program: &'program Program) -> Result<Self, RuntimeError> {
+        let mut functions = HashMap::new();
+
+        for function in &program.functions {
+            if functions.insert(function.name.clone(), function).is_some() {
+                return Err(RuntimeError {
+                    message: format!("function `{}` is already defined", function.name),
+                });
+            }
+        }
+
+        Ok(Self {
+            functions,
             output: String::new(),
+        })
+    }
+
+    fn call_main(&mut self) -> Result<Option<Value>, RuntimeError> {
+        self.call_function("main", &[], &HashMap::new())
+    }
+
+    fn call_function(
+        &mut self,
+        name: &str,
+        arguments: &[Expression],
+        caller_variables: &HashMap<String, Value>,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let function = *self.functions.get(name).ok_or_else(|| RuntimeError {
+            message: format!("unknown function `{name}`"),
+        })?;
+
+        if function.parameters.len() != arguments.len() {
+            return Err(RuntimeError {
+                message: format!(
+                    "function `{name}` expects {} argument(s)",
+                    function.parameters.len()
+                ),
+            });
+        }
+
+        let mut variables = HashMap::new();
+
+        for (parameter, argument) in function.parameters.iter().zip(arguments) {
+            let value = self.evaluate_as(argument, parameter.ty, caller_variables)?;
+            variables.insert(parameter.name.clone(), value);
+        }
+
+        let returned = self.run_function(function, &mut variables)?;
+
+        match (function.return_type, returned) {
+            (Some(_), Some(value)) => Ok(Some(value)),
+            (Some(ty), None) => Err(RuntimeError {
+                message: format!("function `{name}` must return `{}`", ty.name()),
+            }),
+            (None, Some(_)) => Err(RuntimeError {
+                message: format!("function `{name}` cannot return a value"),
+            }),
+            (None, None) => Ok(None),
         }
     }
 
-    fn run_function(mut self, function: &Function) -> Result<String, RuntimeError> {
+    fn run_function(
+        &mut self,
+        function: &Function,
+        variables: &mut HashMap<String, Value>,
+    ) -> Result<Option<Value>, RuntimeError> {
         for statement in &function.body.statements {
-            self.run_statement(statement)?;
+            if let Some(value) = self.run_statement(statement, function.return_type, variables)? {
+                return Ok(Some(value));
+            }
         }
 
-        Ok(self.output)
+        Ok(None)
     }
 
-    fn run_statement(&mut self, statement: &Statement) -> Result<(), RuntimeError> {
+    fn run_statement(
+        &mut self,
+        statement: &Statement,
+        return_type: Option<Type>,
+        variables: &mut HashMap<String, Value>,
+    ) -> Result<Option<Value>, RuntimeError> {
         match statement {
             Let(statement) => {
-                let value = self.evaluate_as(&statement.value, statement.ty)?;
-                self.variables.insert(statement.name.clone(), value);
-                Ok(())
+                let value = self.evaluate_as(&statement.value, statement.ty, variables)?;
+                variables.insert(statement.name.clone(), value);
+                Ok(None)
             }
             Call(statement) => {
-                if statement.name != "println" {
+                let call = CallExpression {
+                    name: statement.name.clone(),
+                    arguments: statement.arguments.clone(),
+                };
+                self.evaluate_call_statement(&call, variables)?;
+                Ok(None)
+            }
+            Return(statement) => {
+                let Some(ty) = return_type else {
                     return Err(RuntimeError {
-                        message: format!("unknown function `{}`", statement.name),
+                        message: "cannot return a value from function without return type"
+                            .to_string(),
                     });
-                }
+                };
 
-                if statement.arguments.len() != 1 {
-                    return Err(RuntimeError {
-                        message: "function `println` expects 1 argument".to_string(),
-                    });
-                }
-
-                let value = self.evaluate(&statement.arguments[0])?;
-                self.output.push_str(&value.printable());
-                self.output.push('\n');
-                Ok(())
+                self.evaluate_as(&statement.value, ty, variables).map(Some)
             }
         }
     }
 
-    fn evaluate(&self, expression: &Expression) -> Result<Value, RuntimeError> {
+    fn evaluate(
+        &mut self,
+        expression: &Expression,
+        variables: &HashMap<String, Value>,
+    ) -> Result<Value, RuntimeError> {
         match expression {
-            Expression::Integer(value) => self.integer_value(*value, Type::I32),
-            Expression::Float(value) => self.float_value(value, Type::F64),
+            Expression::Integer(value) => integer_value(*value, Type::I32),
+            Expression::Float(value) => float_value(value, Type::F64),
             Expression::Bool(value) => Ok(Value::Bool(*value)),
             Expression::Variable(name) => {
-                self.variables
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| RuntimeError {
-                        message: format!("variable `{name}` not found"),
-                    })
+                variables.get(name).cloned().ok_or_else(|| RuntimeError {
+                    message: format!("variable `{name}` not found"),
+                })
             }
+            Expression::Call(call) => self.evaluate_call_expression(call, variables),
         }
     }
 
-    fn evaluate_as(&self, expression: &Expression, ty: Type) -> Result<Value, RuntimeError> {
+    fn evaluate_as(
+        &mut self,
+        expression: &Expression,
+        ty: Type,
+        variables: &HashMap<String, Value>,
+    ) -> Result<Value, RuntimeError> {
         match expression {
-            Expression::Integer(value) => self.integer_value(*value, ty),
-            Expression::Float(value) => self.float_value(value, ty),
+            Expression::Integer(value) => integer_value(*value, ty),
+            Expression::Float(value) => float_value(value, ty),
             Expression::Bool(value) => {
                 if ty.is_bool() {
                     Ok(Value::Bool(*value))
@@ -126,60 +192,110 @@ impl Runtime {
                 }
             }
             Expression::Variable(name) => {
-                let value = self
-                    .variables
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| RuntimeError {
-                        message: format!("variable `{name}` not found"),
-                    })?;
-
-                if value.ty() == ty {
-                    Ok(value)
-                } else {
-                    Err(RuntimeError {
-                        message: format!(
-                            "cannot assign `{}` value to `{}`",
-                            value.ty().name(),
-                            ty.name()
-                        ),
-                    })
-                }
+                let value = variables.get(name).cloned().ok_or_else(|| RuntimeError {
+                    message: format!("variable `{name}` not found"),
+                })?;
+                expect_type(value, ty)
+            }
+            Expression::Call(call) => {
+                let value = self.evaluate_call_expression(call, variables)?;
+                expect_type(value, ty)
             }
         }
     }
 
-    fn integer_value(&self, value: u128, ty: Type) -> Result<Value, RuntimeError> {
-        if !ty.is_integer() {
-            return Err(RuntimeError {
-                message: format!("cannot assign integer literal to `{}`", ty.name()),
-            });
+    fn evaluate_call_statement(
+        &mut self,
+        call: &CallExpression,
+        variables: &HashMap<String, Value>,
+    ) -> Result<(), RuntimeError> {
+        if call.name == "println" {
+            return self.evaluate_println(call, variables);
         }
 
-        let max = ty.max_integer_value().expect("integer type has max value");
-
-        if value > max {
-            return Err(RuntimeError {
-                message: format!("integer literal `{value}` does not fit in `{}`", ty.name()),
-            });
-        }
-
-        Ok(Value::Integer { value, ty })
+        self.call_function(&call.name, &call.arguments, variables)?;
+        Ok(())
     }
 
-    fn float_value(&self, value: &str, ty: Type) -> Result<Value, RuntimeError> {
-        if !ty.is_float() {
+    fn evaluate_call_expression(
+        &mut self,
+        call: &CallExpression,
+        variables: &HashMap<String, Value>,
+    ) -> Result<Value, RuntimeError> {
+        if call.name == "println" {
             return Err(RuntimeError {
-                message: format!("cannot assign float literal to `{}`", ty.name()),
+                message: "function `println` does not return a value".to_string(),
             });
         }
 
-        let parsed = value.parse::<f64>().map_err(|_| RuntimeError {
-            message: format!("float literal `{value}` is invalid"),
-        })?;
-
-        Ok(Value::Float { value: parsed, ty })
+        self.call_function(&call.name, &call.arguments, variables)?
+            .ok_or_else(|| RuntimeError {
+                message: format!("function `{}` does not return a value", call.name),
+            })
     }
+
+    fn evaluate_println(
+        &mut self,
+        call: &CallExpression,
+        variables: &HashMap<String, Value>,
+    ) -> Result<(), RuntimeError> {
+        if call.arguments.len() != 1 {
+            return Err(RuntimeError {
+                message: "function `println` expects 1 argument".to_string(),
+            });
+        }
+
+        let value = self.evaluate(&call.arguments[0], variables)?;
+        self.output.push_str(&value.printable());
+        self.output.push('\n');
+        Ok(())
+    }
+}
+
+fn expect_type(value: Value, ty: Type) -> Result<Value, RuntimeError> {
+    if value.ty() == ty {
+        Ok(value)
+    } else {
+        Err(RuntimeError {
+            message: format!(
+                "cannot use `{}` value as `{}`",
+                value.ty().name(),
+                ty.name()
+            ),
+        })
+    }
+}
+
+fn integer_value(value: u128, ty: Type) -> Result<Value, RuntimeError> {
+    if !ty.is_integer() {
+        return Err(RuntimeError {
+            message: format!("cannot assign integer literal to `{}`", ty.name()),
+        });
+    }
+
+    let max = ty.max_integer_value().expect("integer type has max value");
+
+    if value > max {
+        return Err(RuntimeError {
+            message: format!("integer literal `{value}` does not fit in `{}`", ty.name()),
+        });
+    }
+
+    Ok(Value::Integer { value, ty })
+}
+
+fn float_value(value: &str, ty: Type) -> Result<Value, RuntimeError> {
+    if !ty.is_float() {
+        return Err(RuntimeError {
+            message: format!("cannot assign float literal to `{}`", ty.name()),
+        });
+    }
+
+    let parsed = value.parse::<f64>().map_err(|_| RuntimeError {
+        message: format!("float literal `{value}` is invalid"),
+    })?;
+
+    Ok(Value::Float { value: parsed, ty })
 }
 
 #[cfg(test)]
@@ -212,6 +328,31 @@ mod tests {
         let program = parse_source("fn main() { let n: f64 = 1.5 println(n) }").unwrap();
 
         assert_eq!(run_main(&program).unwrap(), "1.5\n");
+    }
+
+    #[test]
+    fn calls_function_with_params_and_return() {
+        let program = parse_source(
+            "fn sample(a: i32, b: bool) -> i32 { return a } fn main() { println(sample(7, true)) }",
+        )
+        .unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "7\n");
+    }
+
+    #[test]
+    fn calls_void_function_with_params() {
+        let program = parse_source("fn log(a: i32) { println(a) } fn main() { log(8) }").unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "8\n");
+    }
+
+    #[test]
+    fn rejects_missing_return() {
+        let program = parse_source("fn sample() -> i32 {} fn main() { sample() }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(error.message.contains("must return `i32`"));
     }
 
     #[test]
