@@ -304,6 +304,7 @@ impl<'program> Runtime<'program> {
                 Ok(Value::Pointer(PointerValue::Reference(Box::new(value))))
             }
             Expression::Dereference(expression) => self.evaluate_dereference(expression, variables),
+            Expression::BitNot(expression) => self.evaluate_bit_not(expression, variables),
             Expression::Binary(binary) => self.evaluate_binary(binary, variables),
         }
     }
@@ -356,6 +357,7 @@ impl<'program> Runtime<'program> {
                 let value = self.evaluate_dereference(expression, variables)?;
                 expect_type(value, ty)
             }
+            Expression::BitNot(expression) => self.evaluate_bit_not_as(expression, ty, variables),
             Expression::Binary(binary) => self.evaluate_binary_as(binary, ty, variables),
         }
     }
@@ -368,14 +370,14 @@ impl<'program> Runtime<'program> {
         if is_untyped_numeric_literal(&binary.left) && !is_untyped_numeric_literal(&binary.right) {
             let right = self.evaluate(&binary.right, variables)?;
             let ty = right.ty();
-            ensure_numeric_operator(binary.operator, &ty)?;
+            ensure_binary_operator(binary.operator, &ty)?;
             let left = self.evaluate_as(&binary.left, ty, variables)?;
             return apply_binary_operator(left, binary.operator, right);
         }
 
         let left = self.evaluate(&binary.left, variables)?;
         let ty = left.ty();
-        ensure_numeric_operator(binary.operator, &ty)?;
+        ensure_binary_operator(binary.operator, &ty)?;
         let right = self.evaluate_as(&binary.right, ty, variables)?;
         apply_binary_operator(left, binary.operator, right)
     }
@@ -386,11 +388,31 @@ impl<'program> Runtime<'program> {
         ty: Type,
         variables: &HashMap<String, Value>,
     ) -> Result<Value, RuntimeError> {
-        ensure_numeric_operator(binary.operator, &ty)?;
+        ensure_binary_operator(binary.operator, &ty)?;
         let left = self.evaluate_as(&binary.left, ty.clone(), variables)?;
         let right = self.evaluate_as(&binary.right, ty, variables)?;
 
         apply_binary_operator(left, binary.operator, right)
+    }
+
+    fn evaluate_bit_not(
+        &mut self,
+        expression: &Expression,
+        variables: &HashMap<String, Value>,
+    ) -> Result<Value, RuntimeError> {
+        let value = self.evaluate(expression, variables)?;
+        apply_bit_not_operator(value)
+    }
+
+    fn evaluate_bit_not_as(
+        &mut self,
+        expression: &Expression,
+        ty: Type,
+        variables: &HashMap<String, Value>,
+    ) -> Result<Value, RuntimeError> {
+        ensure_integer_operator("!", &ty)?;
+        let value = self.evaluate_as(expression, ty, variables)?;
+        apply_bit_not_operator(value)
     }
 
     fn evaluate_call_statement(
@@ -750,34 +772,27 @@ fn apply_integer_operator(
     right: IntegerValue,
     ty: Type,
 ) -> Result<Value, RuntimeError> {
+    match operator {
+        BinaryOperator::Add
+        | BinaryOperator::Subtract
+        | BinaryOperator::Multiply
+        | BinaryOperator::Divide => apply_integer_arithmetic_operator(left, operator, right, ty),
+        BinaryOperator::BitAnd
+        | BinaryOperator::BitOr
+        | BinaryOperator::BitXor
+        | BinaryOperator::ShiftLeft
+        | BinaryOperator::ShiftRight => apply_integer_bitwise_operator(left, operator, right, ty),
+    }
+}
+
+fn apply_integer_arithmetic_operator(
+    left: IntegerValue,
+    operator: BinaryOperator,
+    right: IntegerValue,
+    ty: Type,
+) -> Result<Value, RuntimeError> {
     if ty.is_signed_integer() {
-        let left = signed_integer(left);
-        let right = signed_integer(right);
-
-        if operator == BinaryOperator::Divide && right == 0 {
-            return Err(RuntimeError {
-                message: "division by zero".to_string(),
-            });
-        }
-
-        let result = match operator {
-            BinaryOperator::Add => left.checked_add(right),
-            BinaryOperator::Subtract => left.checked_sub(right),
-            BinaryOperator::Multiply => left.checked_mul(right),
-            BinaryOperator::Divide => left.checked_div(right),
-        }
-        .ok_or_else(|| integer_operation_overflow(&ty))?;
-
-        let (min, max) = signed_integer_bounds(&ty).expect("signed integer type has bounds");
-
-        if result < min || result > max {
-            return Err(integer_operation_overflow(&ty));
-        }
-
-        return Ok(Value::Integer {
-            value: IntegerValue::Signed(result),
-            ty,
-        });
+        return apply_signed_integer_arithmetic_operator(left, operator, right, ty);
     }
 
     let left = unsigned_integer(left);
@@ -794,6 +809,7 @@ fn apply_integer_operator(
         BinaryOperator::Subtract => left.checked_sub(right),
         BinaryOperator::Multiply => left.checked_mul(right),
         BinaryOperator::Divide => left.checked_div(right),
+        _ => unreachable!("checked by caller"),
     }
     .ok_or_else(|| integer_operation_overflow(&ty))?;
 
@@ -807,6 +823,109 @@ fn apply_integer_operator(
 
     Ok(Value::Integer {
         value: IntegerValue::Unsigned(result),
+        ty,
+    })
+}
+
+fn apply_signed_integer_arithmetic_operator(
+    left: IntegerValue,
+    operator: BinaryOperator,
+    right: IntegerValue,
+    ty: Type,
+) -> Result<Value, RuntimeError> {
+    let left = signed_integer(left);
+    let right = signed_integer(right);
+
+    if operator == BinaryOperator::Divide && right == 0 {
+        return Err(RuntimeError {
+            message: "division by zero".to_string(),
+        });
+    }
+
+    let result = match operator {
+        BinaryOperator::Add => left.checked_add(right),
+        BinaryOperator::Subtract => left.checked_sub(right),
+        BinaryOperator::Multiply => left.checked_mul(right),
+        BinaryOperator::Divide => left.checked_div(right),
+        _ => unreachable!("checked by caller"),
+    }
+    .ok_or_else(|| integer_operation_overflow(&ty))?;
+
+    let (min, max) = signed_integer_bounds(&ty).expect("signed integer type has bounds");
+
+    if result < min || result > max {
+        return Err(integer_operation_overflow(&ty));
+    }
+
+    Ok(Value::Integer {
+        value: IntegerValue::Signed(result),
+        ty,
+    })
+}
+
+fn apply_integer_bitwise_operator(
+    left: IntegerValue,
+    operator: BinaryOperator,
+    right: IntegerValue,
+    ty: Type,
+) -> Result<Value, RuntimeError> {
+    let bits = integer_bits(&ty).expect("integer type has bit width");
+
+    if ty.is_signed_integer() {
+        let left = signed_integer(left);
+        let right = signed_integer(right);
+        let value = match operator {
+            BinaryOperator::BitAnd => bits_to_signed(
+                signed_to_bits(left, bits) & signed_to_bits(right, bits),
+                bits,
+            ),
+            BinaryOperator::BitOr => bits_to_signed(
+                signed_to_bits(left, bits) | signed_to_bits(right, bits),
+                bits,
+            ),
+            BinaryOperator::BitXor => bits_to_signed(
+                signed_to_bits(left, bits) ^ signed_to_bits(right, bits),
+                bits,
+            ),
+            BinaryOperator::ShiftLeft => {
+                let shift = signed_shift_amount(right, bits, &ty)?;
+                bits_to_signed(
+                    (signed_to_bits(left, bits) << shift) & integer_mask(bits),
+                    bits,
+                )
+            }
+            BinaryOperator::ShiftRight => {
+                let shift = signed_shift_amount(right, bits, &ty)?;
+                left >> shift
+            }
+            _ => unreachable!("checked by caller"),
+        };
+
+        return Ok(Value::Integer {
+            value: IntegerValue::Signed(value),
+            ty,
+        });
+    }
+
+    let left = unsigned_integer(left);
+    let right = unsigned_integer(right);
+    let value = match operator {
+        BinaryOperator::BitAnd => left & right,
+        BinaryOperator::BitOr => left | right,
+        BinaryOperator::BitXor => left ^ right,
+        BinaryOperator::ShiftLeft => {
+            let shift = unsigned_shift_amount(right, bits, &ty)?;
+            (left << shift) & integer_mask(bits)
+        }
+        BinaryOperator::ShiftRight => {
+            let shift = unsigned_shift_amount(right, bits, &ty)?;
+            left >> shift
+        }
+        _ => unreachable!("checked by caller"),
+    } & integer_mask(bits);
+
+    Ok(Value::Integer {
+        value: IntegerValue::Unsigned(value),
         ty,
     })
 }
@@ -828,12 +947,52 @@ fn apply_float_operator(
         BinaryOperator::Subtract => left - right,
         BinaryOperator::Multiply => left * right,
         BinaryOperator::Divide => left / right,
+        _ => {
+            return Err(RuntimeError {
+                message: format!(
+                    "operator `{}` cannot be used with `{}`",
+                    operator.symbol(),
+                    ty.name()
+                ),
+            });
+        }
     };
 
     Ok(Value::Float { value, ty })
 }
 
-fn ensure_numeric_operator(operator: BinaryOperator, ty: &Type) -> Result<(), RuntimeError> {
+fn apply_bit_not_operator(value: Value) -> Result<Value, RuntimeError> {
+    let ty = value.ty();
+    ensure_integer_operator("!", &ty)?;
+
+    let Value::Integer { value, ty } = value else {
+        unreachable!("integer type is stored as integer value");
+    };
+    let bits = integer_bits(&ty).expect("integer type has bit width");
+
+    if ty.is_signed_integer() {
+        let value = signed_integer(value);
+        let value = bits_to_signed(!signed_to_bits(value, bits) & integer_mask(bits), bits);
+
+        return Ok(Value::Integer {
+            value: IntegerValue::Signed(value),
+            ty,
+        });
+    }
+
+    let value = unsigned_integer(value);
+
+    Ok(Value::Integer {
+        value: IntegerValue::Unsigned(!value & integer_mask(bits)),
+        ty,
+    })
+}
+
+fn ensure_binary_operator(operator: BinaryOperator, ty: &Type) -> Result<(), RuntimeError> {
+    if operator.is_bitwise() {
+        return ensure_integer_operator(operator.symbol(), ty);
+    }
+
     if ty.is_integer() || ty.is_float() {
         return Ok(());
     }
@@ -844,6 +1003,16 @@ fn ensure_numeric_operator(operator: BinaryOperator, ty: &Type) -> Result<(), Ru
             operator.symbol(),
             ty.name()
         ),
+    })
+}
+
+fn ensure_integer_operator(operator: &str, ty: &Type) -> Result<(), RuntimeError> {
+    if ty.is_integer() {
+        return Ok(());
+    }
+
+    Err(RuntimeError {
+        message: format!("operator `{operator}` cannot be used with `{}`", ty.name()),
     })
 }
 
@@ -862,6 +1031,68 @@ fn unsigned_integer(value: IntegerValue) -> u128 {
             u128::try_from(value).expect("unsigned integer value is non-negative")
         }
         IntegerValue::Unsigned(value) => value,
+    }
+}
+
+fn signed_to_bits(value: i128, bits: u32) -> u128 {
+    (value as u128) & integer_mask(bits)
+}
+
+fn bits_to_signed(value: u128, bits: u32) -> i128 {
+    let value = value & integer_mask(bits);
+
+    if bits == 128 {
+        return value as i128;
+    }
+
+    let sign_bit = 1u128 << (bits - 1);
+
+    if value & sign_bit == 0 {
+        value as i128
+    } else {
+        (value as i128) - (1i128 << bits)
+    }
+}
+
+fn signed_shift_amount(value: i128, bits: u32, ty: &Type) -> Result<u32, RuntimeError> {
+    if value < 0 {
+        return Err(RuntimeError {
+            message: "shift amount cannot be negative".to_string(),
+        });
+    }
+
+    unsigned_shift_amount(value as u128, bits, ty)
+}
+
+fn unsigned_shift_amount(value: u128, bits: u32, ty: &Type) -> Result<u32, RuntimeError> {
+    if value >= bits as u128 {
+        return Err(RuntimeError {
+            message: format!(
+                "shift amount must be less than bit width of `{}`",
+                ty.name()
+            ),
+        });
+    }
+
+    Ok(value as u32)
+}
+
+fn integer_bits(ty: &Type) -> Option<u32> {
+    match ty {
+        Type::I8 | Type::U8 => Some(8),
+        Type::I16 | Type::U16 => Some(16),
+        Type::I32 | Type::U32 => Some(32),
+        Type::I64 | Type::U64 | Type::Isize | Type::Usize => Some(64),
+        Type::I128 | Type::U128 => Some(128),
+        _ => None,
+    }
+}
+
+fn integer_mask(bits: u32) -> u128 {
+    if bits == 128 {
+        u128::MAX
+    } else {
+        (1u128 << bits) - 1
     }
 }
 
@@ -887,12 +1118,24 @@ fn is_untyped_numeric_literal(expression: &Expression) -> bool {
 }
 
 impl BinaryOperator {
+    fn is_bitwise(self) -> bool {
+        matches!(
+            self,
+            Self::BitAnd | Self::BitOr | Self::BitXor | Self::ShiftLeft | Self::ShiftRight
+        )
+    }
+
     fn symbol(self) -> &'static str {
         match self {
             Self::Add => "+",
             Self::Subtract => "-",
             Self::Multiply => "*",
             Self::Divide => "/",
+            Self::BitAnd => "&",
+            Self::BitOr => "|",
+            Self::BitXor => "^",
+            Self::ShiftLeft => "<<",
+            Self::ShiftRight => ">>",
         }
     }
 }
@@ -1056,6 +1299,72 @@ mod tests {
         let error = run_main(&program).unwrap_err();
 
         assert!(error.message.contains("does not fit in `u8`"));
+    }
+
+    #[test]
+    fn evaluates_bitwise_integer_operators() {
+        let program = parse_source(
+            "fn main() { let a: u8 = 10 let b: u8 = 12 println(a & b) println(a | b) println(a ^ b) }",
+        )
+        .unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "8\n14\n6\n");
+    }
+
+    #[test]
+    fn evaluates_bit_not_with_type_width() {
+        let program = parse_source("fn main() { let value: u8 = !0 println(value) }").unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "255\n");
+    }
+
+    #[test]
+    fn evaluates_signed_bit_not() {
+        let program = parse_source("fn main() { let value: i32 = !0 println(value) }").unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "-1\n");
+    }
+
+    #[test]
+    fn evaluates_shift_operators() {
+        let program = parse_source(
+            "fn main() { let left: u8 = 1 << 3 let right: u8 = left >> 2 println(left) println(right) }",
+        )
+        .unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "8\n2\n");
+    }
+
+    #[test]
+    fn rejects_bitwise_float() {
+        let program = parse_source("fn main() { let value: f64 = 1.5 & 2.5 }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(
+            error
+                .message
+                .contains("operator `&` cannot be used with `f64`")
+        );
+    }
+
+    #[test]
+    fn rejects_bit_not_bool() {
+        let program = parse_source("fn main() { let value: bool = !true }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(
+            error
+                .message
+                .contains("operator `!` cannot be used with `bool`")
+        );
+    }
+
+    #[test]
+    fn rejects_shift_amount_too_large() {
+        let program = parse_source("fn main() { let value: u8 = 1 << 8 }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(error.message.contains("shift amount must be less"));
     }
 
     #[test]

@@ -245,7 +245,75 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Result<Expression, ParseError> {
-        self.parse_additive_expression()
+        self.parse_bit_or_expression()
+    }
+
+    fn parse_bit_or_expression(&mut self) -> Result<Expression, ParseError> {
+        let mut expression = self.parse_bit_xor_expression()?;
+
+        while self.eat(TokenKind::Pipe) {
+            let right = self.parse_bit_xor_expression()?;
+            expression = Expression::Binary(Box::new(BinaryExpression {
+                left: expression,
+                operator: BinaryOperator::BitOr,
+                right,
+            }));
+        }
+
+        Ok(expression)
+    }
+
+    fn parse_bit_xor_expression(&mut self) -> Result<Expression, ParseError> {
+        let mut expression = self.parse_bit_and_expression()?;
+
+        while self.eat(TokenKind::Caret) {
+            let right = self.parse_bit_and_expression()?;
+            expression = Expression::Binary(Box::new(BinaryExpression {
+                left: expression,
+                operator: BinaryOperator::BitXor,
+                right,
+            }));
+        }
+
+        Ok(expression)
+    }
+
+    fn parse_bit_and_expression(&mut self) -> Result<Expression, ParseError> {
+        let mut expression = self.parse_shift_expression()?;
+
+        while self.eat(TokenKind::Ampersand) {
+            let right = self.parse_shift_expression()?;
+            expression = Expression::Binary(Box::new(BinaryExpression {
+                left: expression,
+                operator: BinaryOperator::BitAnd,
+                right,
+            }));
+        }
+
+        Ok(expression)
+    }
+
+    fn parse_shift_expression(&mut self) -> Result<Expression, ParseError> {
+        let mut expression = self.parse_additive_expression()?;
+
+        loop {
+            let operator = if self.eat(TokenKind::LeftShift) {
+                BinaryOperator::ShiftLeft
+            } else if self.eat(TokenKind::RightShift) {
+                BinaryOperator::ShiftRight
+            } else {
+                break;
+            };
+            let right = self.parse_additive_expression()?;
+
+            expression = Expression::Binary(Box::new(BinaryExpression {
+                left: expression,
+                operator,
+                right,
+            }));
+        }
+
+        Ok(expression)
     }
 
     fn parse_additive_expression(&mut self) -> Result<Expression, ParseError> {
@@ -295,6 +363,12 @@ impl Parser {
     }
 
     fn parse_unary_expression(&mut self) -> Result<Expression, ParseError> {
+        if self.eat(TokenKind::Bang) {
+            return self
+                .parse_unary_expression()
+                .map(|expression| Expression::BitNot(Box::new(expression)));
+        }
+
         if self.eat(TokenKind::Ampersand) {
             return self
                 .parse_unary_expression()
@@ -471,6 +545,9 @@ fn describe_kind(kind: &TokenKind) -> String {
         TokenKind::LeftBrace => "`{`".to_string(),
         TokenKind::RightBrace => "`}`".to_string(),
         TokenKind::Ampersand => "`&`".to_string(),
+        TokenKind::Pipe => "`|`".to_string(),
+        TokenKind::Caret => "`^`".to_string(),
+        TokenKind::Bang => "`!`".to_string(),
         TokenKind::Colon => "`:`".to_string(),
         TokenKind::Comma => "`,`".to_string(),
         TokenKind::Dot => "`.`".to_string(),
@@ -478,6 +555,8 @@ fn describe_kind(kind: &TokenKind) -> String {
         TokenKind::Minus => "`-`".to_string(),
         TokenKind::Star => "`*`".to_string(),
         TokenKind::Slash => "`/`".to_string(),
+        TokenKind::LeftShift => "`<<`".to_string(),
+        TokenKind::RightShift => "`>>`".to_string(),
         TokenKind::Arrow => "`->`".to_string(),
         TokenKind::Equal => "`=`".to_string(),
         TokenKind::Semicolon => "`;`".to_string(),
@@ -822,6 +901,56 @@ mod tests {
                     operator: BinaryOperator::Add,
                     right: Expression::Integer(1),
                 }))],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_bit_not_expression() {
+        let program = parse_source("fn main() { let a: u8 = !1 }").unwrap();
+        let statement = &program.functions[0].body.statements[0];
+
+        assert_eq!(
+            statement,
+            &Statement::Let(crate::LetStatement {
+                name: "a".to_string(),
+                ty: Type::U8,
+                value: Expression::BitNot(Box::new(Expression::Integer(1))),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_bitwise_expression_with_precedence() {
+        let program = parse_source("fn main() { let a: u8 = 1 | 2 ^ 3 & 4 << 1 + 1 }").unwrap();
+        let statement = &program.functions[0].body.statements[0];
+
+        assert_eq!(
+            statement,
+            &Statement::Let(crate::LetStatement {
+                name: "a".to_string(),
+                ty: Type::U8,
+                value: Expression::Binary(Box::new(BinaryExpression {
+                    left: Expression::Integer(1),
+                    operator: BinaryOperator::BitOr,
+                    right: Expression::Binary(Box::new(BinaryExpression {
+                        left: Expression::Integer(2),
+                        operator: BinaryOperator::BitXor,
+                        right: Expression::Binary(Box::new(BinaryExpression {
+                            left: Expression::Integer(3),
+                            operator: BinaryOperator::BitAnd,
+                            right: Expression::Binary(Box::new(BinaryExpression {
+                                left: Expression::Integer(4),
+                                operator: BinaryOperator::ShiftLeft,
+                                right: Expression::Binary(Box::new(BinaryExpression {
+                                    left: Expression::Integer(1),
+                                    operator: BinaryOperator::Add,
+                                    right: Expression::Integer(1),
+                                })),
+                            })),
+                        })),
+                    })),
+                })),
             })
         );
     }

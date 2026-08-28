@@ -1,0 +1,17 @@
+fn main() {
+    let flags: u8 = 10
+    let mask: u8 = 12
+    let both: u8 = flags & mask
+    let either: u8 = flags | mask
+    let toggled: u8 = flags ^ mask
+    let shifted: u8 = 1 << 3
+    let back: u8 = shifted >> 2
+    let inverted: u8 = !0
+
+    println(both)
+    println(either)
+    println(toggled)
+    println(shifted)
+    println(back)
+    println(inverted)
+}

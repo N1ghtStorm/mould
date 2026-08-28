@@ -216,6 +216,7 @@ pub enum Expression {
     FieldAccess(Box<FieldAccess>),
     AddressOf(Box<Expression>),
     Dereference(Box<Expression>),
+    BitNot(Box<Expression>),
     Binary(Box<BinaryExpression>),
 }
 
@@ -232,6 +233,11 @@ pub enum BinaryOperator {
     Subtract,
     Multiply,
     Divide,
+    BitAnd,
+    BitOr,
+    BitXor,
+    ShiftLeft,
+    ShiftRight,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

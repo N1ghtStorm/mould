@@ -29,6 +29,9 @@ pub enum TokenKind {
     LeftBrace,
     RightBrace,
     Ampersand,
+    Pipe,
+    Caret,
+    Bang,
     Colon,
     Comma,
     Dot,
@@ -36,6 +39,8 @@ pub enum TokenKind {
     Minus,
     Star,
     Slash,
+    LeftShift,
+    RightShift,
     Arrow,
     Equal,
     Semicolon,
@@ -77,12 +82,21 @@ impl Lexer<'_> {
                 '{' => self.push_single(TokenKind::LeftBrace),
                 '}' => self.push_single(TokenKind::RightBrace),
                 '&' => self.push_single(TokenKind::Ampersand),
+                '|' => self.push_single(TokenKind::Pipe),
+                '^' => self.push_single(TokenKind::Caret),
+                '!' => self.push_single(TokenKind::Bang),
                 ':' => self.push_single(TokenKind::Colon),
                 ',' => self.push_single(TokenKind::Comma),
                 '.' => self.push_single(TokenKind::Dot),
                 '+' => self.push_single(TokenKind::Plus),
                 '*' => self.push_single(TokenKind::Star),
                 '/' => self.push_single(TokenKind::Slash),
+                '<' if self.peek_next() == Some('<') => {
+                    self.push_double(TokenKind::LeftShift);
+                }
+                '>' if self.peek_next() == Some('>') => {
+                    self.push_double(TokenKind::RightShift);
+                }
                 '-' if self.peek_next() == Some('>') => {
                     self.push_double(TokenKind::Arrow);
                 }

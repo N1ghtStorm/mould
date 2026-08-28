@@ -220,6 +220,13 @@ mod tests {
     }
 
     #[test]
+    fn emits_bitwise_result() {
+        let assembly = compile("fn main() { let n: u8 = 10 & 12 println(n) }");
+
+        assert!(assembly.contains(".asciz \"8\""));
+    }
+
+    #[test]
     fn rejects_use_after_dealloc() {
         let error = compile_error("fn main() { let p: &i32 = alloc(7) dealloc(p) println(*p) }");
 
