@@ -1,0 +1,19 @@
+fn calc(a: i32, b: i32) -> i32 {
+    return a + b * 2
+}
+
+fn main() {
+    let a: i32 = 10
+    let b: i32 = 3
+    let sum: i32 = a + b
+    let diff: i32 = a - b
+    let product: i32 = a * b
+    let quotient: i32 = a / b
+    let mixed: i32 = calc(sum, diff) - product / quotient
+
+    println(sum)
+    println(diff)
+    println(product)
+    println(quotient)
+    println(mixed)
+}

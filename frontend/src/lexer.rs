@@ -32,7 +32,10 @@ pub enum TokenKind {
     Colon,
     Comma,
     Dot,
+    Plus,
+    Minus,
     Star,
+    Slash,
     Arrow,
     Equal,
     Semicolon,
@@ -77,10 +80,13 @@ impl Lexer<'_> {
                 ':' => self.push_single(TokenKind::Colon),
                 ',' => self.push_single(TokenKind::Comma),
                 '.' => self.push_single(TokenKind::Dot),
+                '+' => self.push_single(TokenKind::Plus),
                 '*' => self.push_single(TokenKind::Star),
+                '/' => self.push_single(TokenKind::Slash),
                 '-' if self.peek_next() == Some('>') => {
                     self.push_double(TokenKind::Arrow);
                 }
+                '-' => self.push_single(TokenKind::Minus),
                 '=' => self.push_single(TokenKind::Equal),
                 ';' => self.push_single(TokenKind::Semicolon),
                 ch if is_ident_start(ch) => self.lex_identifier(),

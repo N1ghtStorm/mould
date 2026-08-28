@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    CallExpression, Expression, FieldAccess, Function, Program,
+    BinaryExpression, BinaryOperator, CallExpression, Expression, FieldAccess, Function, Program,
     Statement::{self, Call, Let, Return},
     StructDefinition, StructLiteral, Type,
 };
@@ -20,7 +20,7 @@ pub fn run_main(program: &Program) -> Result<String, RuntimeError> {
 #[derive(Debug, Clone, PartialEq)]
 enum Value {
     Integer {
-        value: u128,
+        value: IntegerValue,
         ty: Type,
     },
     Float {
@@ -33,6 +33,12 @@ enum Value {
         fields: Vec<(String, Value)>,
     },
     Pointer(PointerValue),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum IntegerValue {
+    Signed(i128),
+    Unsigned(u128),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,7 +59,7 @@ impl Value {
 
     fn printable(&self) -> String {
         match self {
-            Self::Integer { value, .. } => value.to_string(),
+            Self::Integer { value, .. } => value.printable(),
             Self::Float { value, .. } => value.to_string(),
             Self::Bool(value) => value.to_string(),
             Self::Struct { name, fields } => {
@@ -65,6 +71,15 @@ impl Value {
                 format!("{name} {{ {fields} }}")
             }
             Self::Pointer(pointer) => pointer.printable(),
+        }
+    }
+}
+
+impl IntegerValue {
+    fn printable(&self) -> String {
+        match self {
+            Self::Signed(value) => value.to_string(),
+            Self::Unsigned(value) => value.to_string(),
         }
     }
 }
@@ -289,6 +304,7 @@ impl<'program> Runtime<'program> {
                 Ok(Value::Pointer(PointerValue::Reference(Box::new(value))))
             }
             Expression::Dereference(expression) => self.evaluate_dereference(expression, variables),
+            Expression::Binary(binary) => self.evaluate_binary(binary, variables),
         }
     }
 
@@ -340,7 +356,41 @@ impl<'program> Runtime<'program> {
                 let value = self.evaluate_dereference(expression, variables)?;
                 expect_type(value, ty)
             }
+            Expression::Binary(binary) => self.evaluate_binary_as(binary, ty, variables),
         }
+    }
+
+    fn evaluate_binary(
+        &mut self,
+        binary: &BinaryExpression,
+        variables: &HashMap<String, Value>,
+    ) -> Result<Value, RuntimeError> {
+        if is_untyped_numeric_literal(&binary.left) && !is_untyped_numeric_literal(&binary.right) {
+            let right = self.evaluate(&binary.right, variables)?;
+            let ty = right.ty();
+            ensure_numeric_operator(binary.operator, &ty)?;
+            let left = self.evaluate_as(&binary.left, ty, variables)?;
+            return apply_binary_operator(left, binary.operator, right);
+        }
+
+        let left = self.evaluate(&binary.left, variables)?;
+        let ty = left.ty();
+        ensure_numeric_operator(binary.operator, &ty)?;
+        let right = self.evaluate_as(&binary.right, ty, variables)?;
+        apply_binary_operator(left, binary.operator, right)
+    }
+
+    fn evaluate_binary_as(
+        &mut self,
+        binary: &BinaryExpression,
+        ty: Type,
+        variables: &HashMap<String, Value>,
+    ) -> Result<Value, RuntimeError> {
+        ensure_numeric_operator(binary.operator, &ty)?;
+        let left = self.evaluate_as(&binary.left, ty.clone(), variables)?;
+        let right = self.evaluate_as(&binary.right, ty, variables)?;
+
+        apply_binary_operator(left, binary.operator, right)
     }
 
     fn evaluate_call_statement(
@@ -645,6 +695,208 @@ fn is_builtin_function(name: &str) -> bool {
     matches!(name, "println" | "alloc" | "dealloc")
 }
 
+fn apply_binary_operator(
+    left: Value,
+    operator: BinaryOperator,
+    right: Value,
+) -> Result<Value, RuntimeError> {
+    let ty = left.ty();
+
+    if right.ty() != ty {
+        return Err(RuntimeError {
+            message: format!(
+                "operator `{}` expects matching types, found `{}` and `{}`",
+                operator.symbol(),
+                ty.name(),
+                right.ty().name()
+            ),
+        });
+    }
+
+    if ty.is_integer() {
+        let Value::Integer { value: left, .. } = left else {
+            unreachable!("integer type is stored as integer value");
+        };
+        let Value::Integer { value: right, .. } = right else {
+            unreachable!("integer type is stored as integer value");
+        };
+
+        return apply_integer_operator(left, operator, right, ty);
+    }
+
+    if ty.is_float() {
+        let Value::Float { value: left, .. } = left else {
+            unreachable!("float type is stored as float value");
+        };
+        let Value::Float { value: right, .. } = right else {
+            unreachable!("float type is stored as float value");
+        };
+
+        return apply_float_operator(left, operator, right, ty);
+    }
+
+    Err(RuntimeError {
+        message: format!(
+            "operator `{}` cannot be used with `{}`",
+            operator.symbol(),
+            ty.name()
+        ),
+    })
+}
+
+fn apply_integer_operator(
+    left: IntegerValue,
+    operator: BinaryOperator,
+    right: IntegerValue,
+    ty: Type,
+) -> Result<Value, RuntimeError> {
+    if ty.is_signed_integer() {
+        let left = signed_integer(left);
+        let right = signed_integer(right);
+
+        if operator == BinaryOperator::Divide && right == 0 {
+            return Err(RuntimeError {
+                message: "division by zero".to_string(),
+            });
+        }
+
+        let result = match operator {
+            BinaryOperator::Add => left.checked_add(right),
+            BinaryOperator::Subtract => left.checked_sub(right),
+            BinaryOperator::Multiply => left.checked_mul(right),
+            BinaryOperator::Divide => left.checked_div(right),
+        }
+        .ok_or_else(|| integer_operation_overflow(&ty))?;
+
+        let (min, max) = signed_integer_bounds(&ty).expect("signed integer type has bounds");
+
+        if result < min || result > max {
+            return Err(integer_operation_overflow(&ty));
+        }
+
+        return Ok(Value::Integer {
+            value: IntegerValue::Signed(result),
+            ty,
+        });
+    }
+
+    let left = unsigned_integer(left);
+    let right = unsigned_integer(right);
+
+    if operator == BinaryOperator::Divide && right == 0 {
+        return Err(RuntimeError {
+            message: "division by zero".to_string(),
+        });
+    }
+
+    let result = match operator {
+        BinaryOperator::Add => left.checked_add(right),
+        BinaryOperator::Subtract => left.checked_sub(right),
+        BinaryOperator::Multiply => left.checked_mul(right),
+        BinaryOperator::Divide => left.checked_div(right),
+    }
+    .ok_or_else(|| integer_operation_overflow(&ty))?;
+
+    let max = ty
+        .max_integer_value()
+        .expect("unsigned integer type has max");
+
+    if result > max {
+        return Err(integer_operation_overflow(&ty));
+    }
+
+    Ok(Value::Integer {
+        value: IntegerValue::Unsigned(result),
+        ty,
+    })
+}
+
+fn apply_float_operator(
+    left: f64,
+    operator: BinaryOperator,
+    right: f64,
+    ty: Type,
+) -> Result<Value, RuntimeError> {
+    if operator == BinaryOperator::Divide && right == 0.0 {
+        return Err(RuntimeError {
+            message: "division by zero".to_string(),
+        });
+    }
+
+    let value = match operator {
+        BinaryOperator::Add => left + right,
+        BinaryOperator::Subtract => left - right,
+        BinaryOperator::Multiply => left * right,
+        BinaryOperator::Divide => left / right,
+    };
+
+    Ok(Value::Float { value, ty })
+}
+
+fn ensure_numeric_operator(operator: BinaryOperator, ty: &Type) -> Result<(), RuntimeError> {
+    if ty.is_integer() || ty.is_float() {
+        return Ok(());
+    }
+
+    Err(RuntimeError {
+        message: format!(
+            "operator `{}` cannot be used with `{}`",
+            operator.symbol(),
+            ty.name()
+        ),
+    })
+}
+
+fn signed_integer(value: IntegerValue) -> i128 {
+    match value {
+        IntegerValue::Signed(value) => value,
+        IntegerValue::Unsigned(value) => {
+            i128::try_from(value).expect("signed integer value fits in i128")
+        }
+    }
+}
+
+fn unsigned_integer(value: IntegerValue) -> u128 {
+    match value {
+        IntegerValue::Signed(value) => {
+            u128::try_from(value).expect("unsigned integer value is non-negative")
+        }
+        IntegerValue::Unsigned(value) => value,
+    }
+}
+
+fn signed_integer_bounds(ty: &Type) -> Option<(i128, i128)> {
+    match ty {
+        Type::I8 => Some((i8::MIN as i128, i8::MAX as i128)),
+        Type::I16 => Some((i16::MIN as i128, i16::MAX as i128)),
+        Type::I32 => Some((i32::MIN as i128, i32::MAX as i128)),
+        Type::I64 | Type::Isize => Some((i64::MIN as i128, i64::MAX as i128)),
+        Type::I128 => Some((i128::MIN, i128::MAX)),
+        _ => None,
+    }
+}
+
+fn integer_operation_overflow(ty: &Type) -> RuntimeError {
+    RuntimeError {
+        message: format!("operation result does not fit in `{}`", ty.name()),
+    }
+}
+
+fn is_untyped_numeric_literal(expression: &Expression) -> bool {
+    matches!(expression, Expression::Integer(_) | Expression::Float(_))
+}
+
+impl BinaryOperator {
+    fn symbol(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Subtract => "-",
+            Self::Multiply => "*",
+            Self::Divide => "/",
+        }
+    }
+}
+
 fn expect_type(value: Value, ty: Type) -> Result<Value, RuntimeError> {
     if value.ty() == ty {
         Ok(value)
@@ -673,6 +925,15 @@ fn integer_value(value: u128, ty: Type) -> Result<Value, RuntimeError> {
             message: format!("integer literal `{value}` does not fit in `{}`", ty.name()),
         });
     }
+
+    let value = if ty.is_signed_integer() {
+        let value = i128::try_from(value).map_err(|_| RuntimeError {
+            message: format!("integer literal `{value}` does not fit in `{}`", ty.name()),
+        })?;
+        IntegerValue::Signed(value)
+    } else {
+        IntegerValue::Unsigned(value)
+    };
 
     Ok(Value::Integer { value, ty })
 }
@@ -721,6 +982,80 @@ mod tests {
         let program = parse_source("fn main() { let n: f64 = 1.5 println(n) }").unwrap();
 
         assert_eq!(run_main(&program).unwrap(), "1.5\n");
+    }
+
+    #[test]
+    fn evaluates_integer_math_with_precedence() {
+        let program = parse_source("fn main() { let n: i32 = 1 + 2 * 3 println(n) }").unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "7\n");
+    }
+
+    #[test]
+    fn evaluates_all_integer_math_operators() {
+        let program =
+            parse_source("fn main() { let n: i32 = 20 + 6 - 3 * 4 / 2 println(n) }").unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "20\n");
+    }
+
+    #[test]
+    fn evaluates_signed_negative_result() {
+        let program = parse_source("fn main() { let n: i32 = 1 - 2 println(n) }").unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "-1\n");
+    }
+
+    #[test]
+    fn infers_literal_from_variable_type_in_math() {
+        let program =
+            parse_source("fn main() { let a: u8 = 2 let b: u8 = a + 1 println(b) }").unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "3\n");
+    }
+
+    #[test]
+    fn evaluates_float_math() {
+        let program = parse_source("fn main() { let n: f64 = 1.5 + 2.25 println(n) }").unwrap();
+
+        assert_eq!(run_main(&program).unwrap(), "3.75\n");
+    }
+
+    #[test]
+    fn rejects_math_with_mismatched_variable_types() {
+        let program =
+            parse_source("fn main() { let a: i32 = 1 let b: u32 = 2 println(a + b) }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(error.message.contains("cannot use `u32` value as `i32`"));
+    }
+
+    #[test]
+    fn rejects_math_on_bool() {
+        let program = parse_source("fn main() { let value: bool = true + false }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(
+            error
+                .message
+                .contains("operator `+` cannot be used with `bool`")
+        );
+    }
+
+    #[test]
+    fn rejects_integer_division_by_zero() {
+        let program = parse_source("fn main() { let value: i32 = 1 / 0 }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(error.message.contains("division by zero"));
+    }
+
+    #[test]
+    fn rejects_unsigned_underflow() {
+        let program = parse_source("fn main() { let value: u8 = 1 - 2 }").unwrap();
+        let error = run_main(&program).unwrap_err();
+
+        assert!(error.message.contains("does not fit in `u8`"));
     }
 
     #[test]

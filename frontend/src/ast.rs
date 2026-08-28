@@ -165,6 +165,13 @@ impl Type {
         )
     }
 
+    pub fn is_signed_integer(&self) -> bool {
+        matches!(
+            self,
+            Self::I8 | Self::I16 | Self::I32 | Self::I64 | Self::I128 | Self::Isize
+        )
+    }
+
     pub fn is_float(&self) -> bool {
         matches!(self, Self::F16 | Self::F32 | Self::F64)
     }
@@ -209,6 +216,22 @@ pub enum Expression {
     FieldAccess(Box<FieldAccess>),
     AddressOf(Box<Expression>),
     Dereference(Box<Expression>),
+    Binary(Box<BinaryExpression>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryExpression {
+    pub left: Expression,
+    pub operator: BinaryOperator,
+    pub right: Expression,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryOperator {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

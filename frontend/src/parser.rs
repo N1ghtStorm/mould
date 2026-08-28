@@ -1,8 +1,8 @@
 use crate::{
     ast::{
-        Block, CallExpression, CallStatement, Expression, FieldAccess, Function, FunctionParameter,
-        LetStatement, Program, ReturnStatement, Statement, StructDefinition, StructField,
-        StructLiteral, StructLiteralField, Type,
+        BinaryExpression, BinaryOperator, Block, CallExpression, CallStatement, Expression,
+        FieldAccess, Function, FunctionParameter, LetStatement, Program, ReturnStatement,
+        Statement, StructDefinition, StructField, StructLiteral, StructLiteralField, Type,
     },
     lexer::{LexError, Span, Token, TokenKind, lex},
 };
@@ -245,18 +245,72 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Result<Expression, ParseError> {
+        self.parse_additive_expression()
+    }
+
+    fn parse_additive_expression(&mut self) -> Result<Expression, ParseError> {
+        let mut expression = self.parse_multiplicative_expression()?;
+
+        loop {
+            let operator = if self.eat(TokenKind::Plus) {
+                BinaryOperator::Add
+            } else if self.eat(TokenKind::Minus) {
+                BinaryOperator::Subtract
+            } else {
+                break;
+            };
+            let right = self.parse_multiplicative_expression()?;
+
+            expression = Expression::Binary(Box::new(BinaryExpression {
+                left: expression,
+                operator,
+                right,
+            }));
+        }
+
+        Ok(expression)
+    }
+
+    fn parse_multiplicative_expression(&mut self) -> Result<Expression, ParseError> {
+        let mut expression = self.parse_unary_expression()?;
+
+        loop {
+            let operator = if self.eat(TokenKind::Star) {
+                BinaryOperator::Multiply
+            } else if self.eat(TokenKind::Slash) {
+                BinaryOperator::Divide
+            } else {
+                break;
+            };
+            let right = self.parse_unary_expression()?;
+
+            expression = Expression::Binary(Box::new(BinaryExpression {
+                left: expression,
+                operator,
+                right,
+            }));
+        }
+
+        Ok(expression)
+    }
+
+    fn parse_unary_expression(&mut self) -> Result<Expression, ParseError> {
         if self.eat(TokenKind::Ampersand) {
             return self
-                .parse_expression()
+                .parse_unary_expression()
                 .map(|expression| Expression::AddressOf(Box::new(expression)));
         }
 
         if self.eat(TokenKind::Star) {
             return self
-                .parse_expression()
+                .parse_unary_expression()
                 .map(|expression| Expression::Dereference(Box::new(expression)));
         }
 
+        self.parse_postfix_expression()
+    }
+
+    fn parse_postfix_expression(&mut self) -> Result<Expression, ParseError> {
         let mut expression = self.parse_primary_expression()?;
 
         while self.eat(TokenKind::Dot) {
@@ -420,7 +474,10 @@ fn describe_kind(kind: &TokenKind) -> String {
         TokenKind::Colon => "`:`".to_string(),
         TokenKind::Comma => "`,`".to_string(),
         TokenKind::Dot => "`.`".to_string(),
+        TokenKind::Plus => "`+`".to_string(),
+        TokenKind::Minus => "`-`".to_string(),
         TokenKind::Star => "`*`".to_string(),
+        TokenKind::Slash => "`/`".to_string(),
         TokenKind::Arrow => "`->`".to_string(),
         TokenKind::Equal => "`=`".to_string(),
         TokenKind::Semicolon => "`;`".to_string(),
@@ -431,7 +488,7 @@ fn describe_kind(kind: &TokenKind) -> String {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Expression,
+        BinaryExpression, BinaryOperator, Expression,
         Statement::{self},
         Type,
     };
@@ -724,6 +781,48 @@ mod tests {
         assert_eq!(
             function.parameters[0].ty,
             Type::Pointer(Box::new(Type::Struct("Point".to_string())))
+        );
+    }
+
+    #[test]
+    fn parses_binary_expression_with_precedence() {
+        let program = parse_source("fn main() { let a: i32 = 1 + 2 * 3 }").unwrap();
+        let statement = &program.functions[0].body.statements[0];
+
+        assert_eq!(
+            statement,
+            &Statement::Let(crate::LetStatement {
+                name: "a".to_string(),
+                ty: Type::I32,
+                value: Expression::Binary(Box::new(BinaryExpression {
+                    left: Expression::Integer(1),
+                    operator: BinaryOperator::Add,
+                    right: Expression::Binary(Box::new(BinaryExpression {
+                        left: Expression::Integer(2),
+                        operator: BinaryOperator::Multiply,
+                        right: Expression::Integer(3),
+                    })),
+                })),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_dereference_inside_binary_expression() {
+        let program =
+            parse_source("fn main() { let a: i32 = 7 let p: &i32 = &a println(*p + 1) }").unwrap();
+        let statement = &program.functions[0].body.statements[2];
+
+        assert_eq!(
+            statement,
+            &Statement::Call(crate::CallStatement {
+                name: "println".to_string(),
+                arguments: vec![Expression::Binary(Box::new(BinaryExpression {
+                    left: Expression::Dereference(Box::new(Expression::Variable("p".to_string()))),
+                    operator: BinaryOperator::Add,
+                    right: Expression::Integer(1),
+                }))],
+            })
         );
     }
 
