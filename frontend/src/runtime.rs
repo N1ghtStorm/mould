@@ -1317,40 +1317,6 @@ fn is_untyped_numeric_literal(expression: &Expression) -> bool {
     matches!(expression, Expression::Integer(_) | Expression::Float(_))
 }
 
-impl BinaryOperator {
-    fn result_is_bool(self) -> bool {
-        matches!(
-            self,
-            Self::BoolAnd | Self::BoolOr | Self::Equal | Self::NotEqual
-        )
-    }
-
-    fn is_bitwise(self) -> bool {
-        matches!(
-            self,
-            Self::BitAnd | Self::BitOr | Self::BitXor | Self::ShiftLeft | Self::ShiftRight
-        )
-    }
-
-    fn symbol(self) -> &'static str {
-        match self {
-            Self::Add => "+",
-            Self::Subtract => "-",
-            Self::Multiply => "*",
-            Self::Divide => "/",
-            Self::BitAnd => "&",
-            Self::BitOr => "|",
-            Self::BitXor => "^",
-            Self::ShiftLeft => "<<",
-            Self::ShiftRight => ">>",
-            Self::BoolAnd => "&&",
-            Self::BoolOr => "||",
-            Self::Equal => "==",
-            Self::NotEqual => "!=",
-        }
-    }
-}
-
 fn expect_type(value: Value, ty: Type) -> Result<Value, RuntimeError> {
     if value.ty() == ty {
         Ok(value)

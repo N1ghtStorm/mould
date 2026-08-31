@@ -1,0 +1,16 @@
+fn main() {
+    let big: u128 = 18446744073709551616
+    let bigger: u128 = big + 1
+    let shifted: u128 = 1 << 65
+    let divided: u128 = shifted / 2
+    let negative: i128 = 1 - 2
+    let signed_divided: i128 = negative / 1
+
+    println(big)
+    println(bigger)
+    println(shifted)
+    println(divided)
+    println(negative)
+    println(signed_divided)
+    println(big != bigger)
+}

@@ -1,0 +1,22 @@
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+fn sum(a: i32, b: i32) -> i32 {
+    return a + b
+}
+
+fn main() {
+    let point: Point = Point { x: 7, y: 9 }
+    let value: i32 = sum(point.x, point.y)
+    let heap: &i32 = alloc(value)
+
+    if *heap == 16 {
+        println(*heap)
+    } else {
+        println(0)
+    }
+
+    dealloc(heap)
+}

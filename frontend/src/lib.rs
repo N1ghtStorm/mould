@@ -2,6 +2,7 @@ pub mod ast;
 pub mod lexer;
 pub mod parser;
 pub mod runtime;
+pub mod typechecker;
 
 pub use ast::{
     BinaryExpression, BinaryOperator, Block, CallExpression, CallStatement, Expression,
@@ -12,3 +13,4 @@ pub use ast::{
 pub use lexer::{LexError, Span};
 pub use parser::{ParseError, parse_source};
 pub use runtime::{RuntimeError, run_main};
+pub use typechecker::{CheckedProgram, CheckedStruct, FunctionSignature, TypeError, check_program};

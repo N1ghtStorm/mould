@@ -267,6 +267,40 @@ pub enum BinaryOperator {
     NotEqual,
 }
 
+impl BinaryOperator {
+    pub fn result_is_bool(self) -> bool {
+        matches!(
+            self,
+            Self::BoolAnd | Self::BoolOr | Self::Equal | Self::NotEqual
+        )
+    }
+
+    pub fn is_bitwise(self) -> bool {
+        matches!(
+            self,
+            Self::BitAnd | Self::BitOr | Self::BitXor | Self::ShiftLeft | Self::ShiftRight
+        )
+    }
+
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Subtract => "-",
+            Self::Multiply => "*",
+            Self::Divide => "/",
+            Self::BitAnd => "&",
+            Self::BitOr => "|",
+            Self::BitXor => "^",
+            Self::ShiftLeft => "<<",
+            Self::ShiftRight => ">>",
+            Self::BoolAnd => "&&",
+            Self::BoolOr => "||",
+            Self::Equal => "==",
+            Self::NotEqual => "!=",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallExpression {
     pub name: String,
