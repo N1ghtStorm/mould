@@ -25,6 +25,20 @@ pub fn compile_file(source_path: &Path, output_path: &Path) -> Result<(), Compil
     compile_source_to_executable(&source, output_path)
 }
 
+pub fn compile_file_to_assembly(
+    source_path: &Path,
+    output_path: &Path,
+) -> Result<(), CompileError> {
+    let source = fs::read_to_string(source_path).map_err(|error| CompileError {
+        message: format!("failed to read `{}`: {error}", source_path.display()),
+    })?;
+    let assembly = compile_source_to_assembly(&source)?;
+
+    fs::write(output_path, assembly).map_err(|error| CompileError {
+        message: format!("failed to write `{}`: {error}", output_path.display()),
+    })
+}
+
 pub fn compile_source_to_executable(source: &str, output_path: &Path) -> Result<(), CompileError> {
     let program = frontend::parse_source(source).map_err(|error| CompileError {
         message: format!(
@@ -34,6 +48,17 @@ pub fn compile_source_to_executable(source: &str, output_path: &Path) -> Result<
     })?;
 
     compile_program_to_executable(&program, output_path)
+}
+
+pub fn compile_source_to_assembly(source: &str) -> Result<String, CompileError> {
+    let program = frontend::parse_source(source).map_err(|error| CompileError {
+        message: format!(
+            "parse error at {}..{}: {}",
+            error.span.start, error.span.end, error.message
+        ),
+    })?;
+
+    compile_program_to_assembly(&program)
 }
 
 pub fn compile_program_to_executable(

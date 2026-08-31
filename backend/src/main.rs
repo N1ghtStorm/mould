@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use backend::compile_file;
+use backend::{compile_file, compile_file_to_assembly};
 
 fn main() {
     let command = match parse_args(env::args().skip(1)) {
@@ -32,6 +32,10 @@ enum CliCommand {
         source_path: PathBuf,
         output_path: PathBuf,
     },
+    EmitAssembly {
+        source_path: PathBuf,
+        output_path: PathBuf,
+    },
 }
 
 fn run(command: CliCommand) -> Result<(), String> {
@@ -44,6 +48,15 @@ fn run(command: CliCommand) -> Result<(), String> {
             compile_file(&source_path, &output_path)
                 .map_err(|error| format!("compile error: {}", error.message))?;
             println!("compiled {}", output_path.display());
+            Ok(())
+        }
+        CliCommand::EmitAssembly {
+            source_path,
+            output_path,
+        } => {
+            compile_file_to_assembly(&source_path, &output_path)
+                .map_err(|error| format!("compile error: {}", error.message))?;
+            println!("wrote assembly {}", output_path.display());
             Ok(())
         }
     }
@@ -74,9 +87,16 @@ fn run_file(source_path: &Path) -> Result<(), String> {
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<CliCommand, String> {
     let mut source_path = None;
     let mut output_path = None;
+    let mut emit_assembly = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "-S" | "--emit-asm" => {
+                if emit_assembly {
+                    return Err("assembly output flag was passed twice".to_string());
+                }
+                emit_assembly = true;
+            }
             "-o" | "--output" => {
                 let Some(path) = args.next() else {
                     return Err("missing output file after `-o`".to_string());
@@ -111,6 +131,14 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<CliCommand, Stri
         return Err("source file must have `.mould` extension".to_string());
     }
 
+    if emit_assembly {
+        let output_path = output_path.unwrap_or_else(|| source_path.with_extension("s"));
+        return Ok(CliCommand::EmitAssembly {
+            source_path,
+            output_path,
+        });
+    }
+
     if let Some(output_path) = output_path {
         return Ok(CliCommand::Build {
             source_path,
@@ -124,6 +152,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<CliCommand, Stri
 fn print_usage() {
     eprintln!("usage: mould <source-file.mould>");
     eprintln!("       mould <source-file.mould> -o <output-file>");
+    eprintln!("       mould <source-file.mould> -S [-o <output-file.s>]");
 }
 
 fn temporary_executable_path() -> PathBuf {
@@ -155,6 +184,7 @@ mod tests {
                 assert_eq!(source_path, PathBuf::from("samples/hello.mould"));
             }
             CliCommand::Build { .. } => panic!("expected run command"),
+            CliCommand::EmitAssembly { .. } => panic!("expected run command"),
         }
     }
 
@@ -179,6 +209,50 @@ mod tests {
                 assert_eq!(output_path, PathBuf::from("hello"));
             }
             CliCommand::Run { .. } => panic!("expected build command"),
+            CliCommand::EmitAssembly { .. } => panic!("expected build command"),
+        }
+    }
+
+    #[test]
+    fn parses_emit_assembly_command() {
+        let command = parse_args(
+            [
+                "samples/hello.mould".to_string(),
+                "-S".to_string(),
+                "-o".to_string(),
+                "hello.s".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        match command {
+            CliCommand::EmitAssembly {
+                source_path,
+                output_path,
+            } => {
+                assert_eq!(source_path, PathBuf::from("samples/hello.mould"));
+                assert_eq!(output_path, PathBuf::from("hello.s"));
+            }
+            _ => panic!("expected assembly command"),
+        }
+    }
+
+    #[test]
+    fn parses_emit_assembly_command_with_default_output() {
+        let command =
+            parse_args(["samples/hello.mould".to_string(), "--emit-asm".to_string()].into_iter())
+                .unwrap();
+
+        match command {
+            CliCommand::EmitAssembly {
+                source_path,
+                output_path,
+            } => {
+                assert_eq!(source_path, PathBuf::from("samples/hello.mould"));
+                assert_eq!(output_path, PathBuf::from("samples/hello.s"));
+            }
+            _ => panic!("expected assembly command"),
         }
     }
 
